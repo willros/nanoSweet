@@ -119,6 +119,7 @@ It also uses `thpool.h` by Johan Hanssen Seferidis.
 - [x] read splitting
 - [x] Change to threadpool in nanomux
 - [x] Add logging to nanotrim
+- [] Fix the windows branch with gzip append and nanodup
 
 
 
