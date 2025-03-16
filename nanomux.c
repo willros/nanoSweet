@@ -304,6 +304,22 @@ Barcodes parse_barcodes(Nob_String_View content) {
     return barcodes;
 }
 
+
+int num_barcode_fields(const char *csv) {
+    Nob_String_Builder sb = {0};
+    if (!nob_read_entire_file(csv, &sb)) return 1;
+    Nob_String_View content = nob_sv_from_parts(sb.items, sb.count);
+    Nob_String_View line = nob_sv_chop_by_delim(&content, '\n');
+    
+    int number_fields = 0;
+    while (line.count > 0) {
+        nob_sv_chop_by_delim(&line, ',');
+        number_fields++;
+    }
+    
+    return number_fields;
+}
+
 void substring(const char *source, size_t start, size_t length, char *dest) {
     memcpy(dest, source + start, length);
     dest[length] = '\0';
@@ -469,11 +485,92 @@ void process_single_barcode(
 }
 
 
-void run_nanomux(void *arg) {
+void process_single_barcode_forward(
+    const Barcode b,
+    const Reads reads,
+    const char *output,
+    const size_t barcode_pos,
+    const int k,
+    const int trim,
+    FILE *S_FILE,
+    pthread_mutex_t *s_mutex
+) {
+    int counter = 0;
+    
+    // Save fastq
+    char fastq_name[256]; 
+    snprintf(fastq_name, sizeof(fastq_name), "%s/%s.fq.gz", output, b.name);
+    
+    gzFile new_fastq = gzopen(fastq_name, "ab");
+    if (!new_fastq) {
+        nob_log(NOB_INFO, "Failed to open new fastq_file for appending, exiting");
+        return;
+    }
+    
+    // TODO: change this to read_len_max
+    char first_part[1000];
+    char last_part[1000];
+    
+    for (size_t j = 0; j < reads.count; ++j) {
+        Read r = reads.items[j];
+        size_t first_part_start = 0;
+        substring(r.seq, first_part_start, barcode_pos, first_part); 
+        size_t last_part_start = r.length - barcode_pos;
+        substring(r.seq, last_part_start, barcode_pos, last_part); 
+        
+        // Check for barcode in 5' end
+        int match_first_fw = levenshtein_distance(first_part, b.fw, k);
+        if (match_first_fw != -1) {
+            counter++;
+            if (trim) {
+                append_read_to_gzip_fastq_trim(new_fastq, &r, match_first_fw, r.length);
+            } else {
+                append_read_to_gzip_fastq(new_fastq, &r);
+            }
+            continue;
+        }
+        
+        // Check for reverse barcode in 3' end
+        int match_last_rv = levenshtein_distance(last_part, b.fw_comp, k);
+        if (match_last_rv != -1) {
+            counter++;
+            if (trim) {
+                append_read_to_gzip_fastq_trim(new_fastq, &r, 0, last_part_start + match_last_rv - b.rv_length);
+            } else {
+                append_read_to_gzip_fastq(new_fastq, &r);
+            }
+        }
+    }
+    gzclose(new_fastq);
+    
+    pthread_mutex_lock(s_mutex);
+    nob_log(NOB_INFO, "barcode: %30s matches: %i", b.name, counter);
+    fprintf(S_FILE, "%s,%i\n", b.name, counter);
+    pthread_mutex_unlock(s_mutex);
+}
+
+
+void run_nanomux_two(void *arg) {
     NanomuxData *data = (NanomuxData *)arg;
     Reads local_reads = data->reads;
 
     process_single_barcode(
+        data->barcode, 
+        local_reads, 
+        data->output, 
+        data->barcode_pos,
+        data->k, 
+        data->trim,
+        data->S_FILE,
+        data->s_mutex
+    );
+}
+
+void run_nanomux_one(void *arg) {
+    NanomuxData *data = (NanomuxData *)arg;
+    Reads local_reads = data->reads;
+
+    process_single_barcode_forward(
         data->barcode, 
         local_reads, 
         data->output, 
@@ -663,6 +760,10 @@ int main(int argc, char **argv) {
     Nob_String_View content = nob_sv_from_parts(sb.items, sb.count);
     Barcodes barcodes = parse_barcodes(content);
     
+    // If the number fields in barcode file is 3 --> the file contains fw and rv
+    // If the number fields in barcode file is 2 --> the file contains only fw
+    int num_fields = num_barcode_fields(barcode_file);
+    
     nob_log(NOB_INFO, "Parsing fastq file %s", fastq_file);
     Reads reads = parse_fastq(fastq_file, read_len_min, read_len_max, split);
     nob_log(NOB_INFO, "Number of reads after filtering: %zu", reads.count);
@@ -688,12 +789,25 @@ int main(int argc, char **argv) {
         };
         nob_da_append(&nanomux_datas, nanomux_data);
     }
-    for (int i = 0; i < nanomux_datas.count; i++) {
-    	thpool_add_work(thpool, run_nanomux, (void *)&nanomux_datas.items[i]);
+    // forward and reverse barcode
+    if (num_fields == 3) {
+        nob_log(NOB_INFO, "Barcode file contains forward and reverse barcodes\n");
+        for (int i = 0; i < nanomux_datas.count; i++) {
+        	thpool_add_work(thpool, run_nanomux_two, (void *)&nanomux_datas.items[i]);
+        }
+    // only forward barcode
+    } else if (num_fields == 2) {
+        nob_log(NOB_INFO, "Barcode file only contains one barcode\n");
+        for (int i = 0; i < nanomux_datas.count; i++) {
+        	thpool_add_work(thpool, run_nanomux_one, (void *)&nanomux_datas.items[i]);
+        }
+    } else {
+        nob_log(NOB_ERROR, "Fields of barcode must be either 2 or 3");
+        exit(1);
     }
 
-	thpool_wait(thpool);
-	thpool_destroy(thpool);
+    thpool_wait(thpool);
+    thpool_destroy(thpool);
 
     pthread_mutex_destroy(&s_mutex);
 

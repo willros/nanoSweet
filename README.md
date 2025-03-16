@@ -50,16 +50,39 @@ Run `./nanomux` to get the help message:
 * `split_option`: Try to split reads longer than 2500 if an adapter sequence is found in the middle. One splitted read results in two new reads, with the suffix `_1` and `_2`.
 
 `barcode_file.csv` **MUST** have the follwing shape:
-* columns:
-    * name
-    * forward barcode
-    * reverse barcode
+### Dual barcodes:
+For cases where both forward and reverse barcodes are used, the CSV file should have the following columns:
+* name: The identifier for the barcode.
 
-It must look like the example below. 
+* forward barcode: The sequence of the forward barcode.
+
+* reverse barcode: The sequence of the reverse barcode.
+
+Example:
 ```csv
 bc1,ATACGATGCTA,GTCGATGTCTGA
 bc2,GACACACAC,GTCGATTGATG
 ```
+### Single barcodes 
+If the user wants to provide only a single barcode per entry, the file should contain only two columns:
+
+* name: The identifier for the barcode.
+
+* forward barcode: The sequence of the barcode.
+
+Example:
+```csv
+bc1,ATACGATGCTA
+bc2,GACACACAC
+```
+
+If a file with two barcodes is provided, the program will search for the barcodes using both the forward and reverse sequences. If only one barcode is provided, it will only search for matches at the 5’ (start) or 3’ (end) positions in the reads.
+
+### Barcode Matching Process
+
+* Dual-Barcoded Search: The program compares the first part of the read with the forward barcode and the last part with the reverse barcode's reverse complement. If both match, the read is stored.
+
+* Single-Barcoded Search: The program compares the first part of the read with the barcode and the last part with its reverse complement. If either matches, the read is stored.
 
 ## nanotrim
 Run `./nanotrim` to get the help message:
