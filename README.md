@@ -130,7 +130,9 @@ Example of output:
 $ ./nanodup -i tests/test.fastq -o test_nanodup
 $ [INFO] tests/test.fastq contained: 0 duplicates
 ```
+## Citation
 
+If you use nanoSweet, please go here to find how to cite: [nanoSweet](https://zenodo.org/records/15052178) 
 
 ## Credit
 `nanomux_c` uses `kseq.h` for fastq parsing, and `nob.h`, written by [@tsoding](https://www.github.com/tsoding), for overall useful functions!  

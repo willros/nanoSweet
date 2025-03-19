@@ -75,8 +75,6 @@ int levenshtein_distance(const char *haystack, const char *needle, int k) {
     return end_pos;
 }
 
-
-
 typedef enum {
     BARCODE_NAME = 0,
     BARCODE_FW,
@@ -106,6 +104,11 @@ typedef struct {
     int length;
 } Read;
 
+typedef struct {
+    Read *items;
+    size_t count;
+    size_t capacity;
+} Reads;
 
 void free_read(Read *read) {
     if (read) {
@@ -114,13 +117,6 @@ void free_read(Read *read) {
         free((void*)read->name); 
     }
 }
-
-typedef struct {
-    Read *items;
-    size_t count;
-    size_t capacity;
-} Reads;
-
 
 typedef struct {
     Barcode barcode;
@@ -802,7 +798,7 @@ int main(int argc, char **argv) {
         	thpool_add_work(thpool, run_nanomux_one, (void *)&nanomux_datas.items[i]);
         }
     } else {
-        nob_log(NOB_ERROR, "Fields of barcode must be either 2 or 3");
+        nob_log(NOB_ERROR, "Your barcode file is wrong, please look at the documentation");
         exit(1);
     }
 
@@ -819,7 +815,7 @@ int main(int argc, char **argv) {
     fclose(LOG_FILE);
     
     printf("\n");
-    nob_log(NOB_INFO, "Done!");
+    nob_log(NOB_INFO, "nanomux done!");
     
     return 0;
 }
