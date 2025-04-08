@@ -27,53 +27,53 @@
 
 #include "kseq.h"
 #include "thpool.h"
-#include "edlib.h"
 
 #include <zlib.h>
 #include <limits.h> 
 #include <stdint.h>
 #include <pthread.h>
 
-EdlibAlignConfig make_default_config(void) {
-    return edlibNewAlignConfig(
-        // no limit for k
-        -1,   
-        EDLIB_MODE_HW, 
-        EDLIB_TASK_PATH, 
-        NULL,
-        0
-    );
+int min(int a, int b, int c) {
+    int min = a;
+    if (b < min) {
+        min = b;
+    }
+    if (c < min) {
+        min = c;
+    }
+    return min;
 }
 
-//            end (left)      start (right) 
-//             v                v
-//        <---->                <--->
-//  <---------------------------------------->
-typedef struct {
-    int left, right;
-} Trim_Pos;
+// https://stackoverflow.com/questions/8139958/algorithm-to-find-edit-distance-to-all-substrings
+int levenshtein_distance(const char *haystack, const char *needle, int haystack_len, int needle_len, int k) {
 
-bool run_edlib(const char *query, int q_len, const char *target, int t_len, EdlibAlignConfig config, size_t k, Trim_Pos *trim_pos) {
-    EdlibAlignResult result = edlibAlign(query, q_len, target, t_len, config);
-    if (result.status != EDLIB_STATUS_OK) {
-        printf("error with alignment!\n"); 
-        edlibFreeAlignResult(result);
-        trim_pos->right = -1;
-        trim_pos->left = -1;
-        return false;
+    if (k < 0 || k > needle_len) {
+        return -1;  
     }
-    
-    if (result.editDistance >= 0 && result.editDistance <= k) {
-        trim_pos->right = result.endLocations[0];
-        trim_pos->left = result.startLocations[0];
-        edlibFreeAlignResult(result);
-        return true;
+
+    int dp[needle_len + 1][haystack_len + 1];
+
+    for (int j = 0; j <= haystack_len; j++) {
+        dp[0][j] = 0;
     }
-    
-    edlibFreeAlignResult(result);
-    trim_pos->right = -1;
-    trim_pos->left = -1;
-    return false;
+
+    for (int i = 1; i <= needle_len; i++) {
+        dp[i][0] = i;
+        for (int j = 1; j <= haystack_len; j++) {
+            if (needle[i - 1] == haystack[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+            }
+        }
+    }
+
+    for (int j = needle_len; j <= haystack_len; j++) {
+        if (dp[needle_len][j] <= k) {
+            return j;
+        }
+    }
+    return -1;
 }
 
 typedef enum {
@@ -128,7 +128,6 @@ typedef struct {
     int trim;
     FILE *S_FILE;
     pthread_mutex_t *s_mutex;
-    EdlibAlignConfig config;
 } NanomuxData;
 
 typedef struct {
@@ -242,7 +241,6 @@ Barcodes parse_barcodes(Nob_String_View content) {
     return barcodes;
 }
 
-
 int num_barcode_fields(const char *csv) {
     Nob_String_Builder sb = {0};
     if (!nob_read_entire_file(csv, &sb)) return 1;
@@ -309,7 +307,6 @@ defer:
     return result;
 }
 
-
 void process_dual_barcode(
     const Barcode b,
     const Reads reads,
@@ -318,8 +315,7 @@ void process_dual_barcode(
     const size_t k,
     const bool trim,
     FILE *s_file,
-    pthread_mutex_t *s_mutex,
-    EdlibAlignConfig config
+    pthread_mutex_t *s_mutex
 ) {
     int counter = 0;
     
@@ -334,25 +330,23 @@ void process_dual_barcode(
     }
     
     char target_slice[barcode_pos + 10];
-    Trim_Pos trim_pos;
     
-    //todo: what if there are multiple matches? which one to choose then?
-    // probably the last for the left and the first for the right
     for (size_t j = 0; j < reads.count; ++j) {
         Read r = reads.items[j];
         
         // fw ------ revcomp(rv)
         // fw
         slice(r.seq, target_slice, 0, barcode_pos);
-        if (run_edlib(b.fw, b.fw_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
-            int slice_start = trim_pos.right + 1;
+        int match_first_fw = levenshtein_distance(target_slice, b.fw, r.length, b.fw_length, k); 
+        if (match_first_fw != -1) {
             slice(r.seq, target_slice, r.length - barcode_pos, r.length);
             // revcomp(rv)
-            if (run_edlib(b.rv_comp, b.rv_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
+            int match_last_fw = levenshtein_distance(target_slice, b.rv_comp, r.length, b.rv_length, k);
+            if (match_last_fw != -1) {
                 counter++;
-                int slice_end = r.length - barcode_pos + trim_pos.left;
+                int slice_end = r.length - barcode_pos + match_last_fw - b.rv_length;
                 if (trim) {
-                    append_read_to_gzip_fastq(new_fastq, &r, slice_start, slice_end);
+                    append_read_to_gzip_fastq(new_fastq, &r, match_first_fw, slice_end);
                 } else {
                     append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
                 }
@@ -361,24 +355,24 @@ void process_dual_barcode(
         }
         
         // rv ------ revcomp(fw)
-        // rv
         slice(r.seq, target_slice, 0, barcode_pos);
-        if (run_edlib(b.rv, b.rv_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
-            int slice_start = trim_pos.right + 1;
+        int match_first_rv = levenshtein_distance(target_slice, b.rv, r.length, b.rv_length, k); 
+        if (match_first_rv != -1) {
             slice(r.seq, target_slice, r.length - barcode_pos, r.length);
-            // revcomp(fw)
-            if (run_edlib(b.fw_comp, b.fw_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
+            // revcomp(rv)
+            int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, r.length, b.fw_length, k);
+            if (match_last_rv != -1) {
                 counter++;
-                int slice_end = r.length - barcode_pos + trim_pos.left;
+                int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
                 if (trim) {
-                    append_read_to_gzip_fastq(new_fastq, &r, slice_start, slice_end);
+                    append_read_to_gzip_fastq(new_fastq, &r, match_first_rv, slice_end);
                 } else {
                     append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
                 }
             }
         }
     }
-    
+        
     gzclose(new_fastq);
     
     pthread_mutex_lock(s_mutex);
@@ -395,8 +389,7 @@ void process_single_barcode(
     const size_t k,
     const bool trim,
     FILE *s_file,
-    pthread_mutex_t *s_mutex,
-    EdlibAlignConfig config
+    pthread_mutex_t *s_mutex
 ) {
     int counter = 0;
     
@@ -411,18 +404,17 @@ void process_single_barcode(
     }
     
     char target_slice[barcode_pos + 10];
-    Trim_Pos trim_pos;
     
     for (size_t j = 0; j < reads.count; ++j) {
         Read r = reads.items[j];
         
         // Check for barcode in 5' end
         slice(r.seq, target_slice, 0, barcode_pos);
-        if (run_edlib(b.fw, b.fw_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
-            int slice_start = trim_pos.right + 1;
+        int match_first_fw = levenshtein_distance(target_slice, b.fw, r.length, b.fw_length, k);
+        if (match_first_fw != -1) {
             counter++;
             if (trim) {
-                append_read_to_gzip_fastq(new_fastq, &r, slice_start, r.length);
+                append_read_to_gzip_fastq(new_fastq, &r, match_first_fw, r.length);
             } else {
                 append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
             }
@@ -431,16 +423,16 @@ void process_single_barcode(
         
         // Check for barcode in 3' end
         slice(r.seq, target_slice, r.length - barcode_pos, r.length);
-        if (run_edlib(b.fw_comp, b.fw_length, target_slice, strlen(target_slice), config, k, &trim_pos)) {
-            int slice_end = r.length - barcode_pos + trim_pos.left;
+        int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, r.length, b.fw_length, k);
+        if (match_last_rv != -1) {
             counter++;
+            int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
             if (trim) {
                 append_read_to_gzip_fastq(new_fastq, &r, 0, slice_end);
             } else {
                 append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
             }
         }
-        
     }
     
     gzclose(new_fastq);
@@ -463,8 +455,7 @@ void run_nanomux_dual(void *arg) {
         data->k, 
         data->trim,
         data->S_FILE,
-        data->s_mutex,
-        data->config
+        data->s_mutex
     );
 }
 
@@ -480,8 +471,7 @@ void run_nanomux_single(void *arg) {
         data->k, 
         data->trim,
         data->S_FILE,
-        data->s_mutex,
-        data->config
+        data->s_mutex
     );
 }
 
@@ -537,9 +527,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // edlib config
-    EdlibAlignConfig config = make_default_config();
-   
     // create log file
     char log_file[256];
     snprintf(log_file, sizeof(log_file), "%s/nanomux.log", *output);
@@ -602,7 +589,6 @@ int main(int argc, char **argv) {
             .trim = *trim,
             .S_FILE = S_FILE,
             .s_mutex = &s_mutex,
-            .config = config
         };
         nob_da_append(&nanomux_datas, nanomux_data);
     }
