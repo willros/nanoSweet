@@ -45,7 +45,9 @@ int min(int a, int b, int c) {
 }
 
 // https://stackoverflow.com/questions/8139958/algorithm-to-find-edit-distance-to-all-substrings
-int levenshtein_distance(const char *haystack, const char *needle, int haystack_len, int needle_len, int k) {
+int levenshtein_distance(const char *haystack, const char *needle, int k) {
+    int needle_len = strlen(needle);
+    int haystack_len = strlen(haystack);
 
     if (k < 0 || k > needle_len) {
         return -1;  
@@ -148,8 +150,6 @@ Reads parse_fastq(const char *fastq_file_path, int read_len_min, int read_len_ma
     kseq_t *seq = kseq_init(fp); 
     int l;
     Reads reads = {0};
-    
-    int counter = 0;
     
     while ((l = kseq_read(seq)) >= 0) { 
         int length = strlen(seq->seq.s);
@@ -258,7 +258,7 @@ int num_barcode_fields(const char *csv) {
 
 void slice(const char* src, char* dest, size_t start, size_t end) {
     size_t length = end - start;
-    strncpy(dest, src + start, length);
+    memcpy(dest, src + start, length);
     dest[length] = '\0';  
 }
 
@@ -312,7 +312,7 @@ void process_dual_barcode(
     const Reads reads,
     const char *output,
     const size_t barcode_pos,
-    const size_t k,
+    const int k,
     const bool trim,
     FILE *s_file,
     pthread_mutex_t *s_mutex
@@ -337,11 +337,11 @@ void process_dual_barcode(
         // fw ------ revcomp(rv)
         // fw
         slice(r.seq, target_slice, 0, barcode_pos);
-        int match_first_fw = levenshtein_distance(target_slice, b.fw, r.length, b.fw_length, k); 
+        int match_first_fw = levenshtein_distance(target_slice, b.fw, k); 
         if (match_first_fw != -1) {
             slice(r.seq, target_slice, r.length - barcode_pos, r.length);
             // revcomp(rv)
-            int match_last_fw = levenshtein_distance(target_slice, b.rv_comp, r.length, b.rv_length, k);
+            int match_last_fw = levenshtein_distance(target_slice, b.rv_comp, k);
             if (match_last_fw != -1) {
                 counter++;
                 int slice_end = r.length - barcode_pos + match_last_fw - b.rv_length;
@@ -356,11 +356,11 @@ void process_dual_barcode(
         
         // rv ------ revcomp(fw)
         slice(r.seq, target_slice, 0, barcode_pos);
-        int match_first_rv = levenshtein_distance(target_slice, b.rv, r.length, b.rv_length, k); 
+        int match_first_rv = levenshtein_distance(target_slice, b.rv, k); 
         if (match_first_rv != -1) {
             slice(r.seq, target_slice, r.length - barcode_pos, r.length);
             // revcomp(rv)
-            int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, r.length, b.fw_length, k);
+            int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, k);
             if (match_last_rv != -1) {
                 counter++;
                 int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
@@ -386,7 +386,7 @@ void process_single_barcode(
     const Reads reads,
     const char *output,
     const size_t barcode_pos,
-    const size_t k,
+    const int k,
     const bool trim,
     FILE *s_file,
     pthread_mutex_t *s_mutex
@@ -410,7 +410,7 @@ void process_single_barcode(
         
         // Check for barcode in 5' end
         slice(r.seq, target_slice, 0, barcode_pos);
-        int match_first_fw = levenshtein_distance(target_slice, b.fw, r.length, b.fw_length, k);
+        int match_first_fw = levenshtein_distance(target_slice, b.fw, k);
         if (match_first_fw != -1) {
             counter++;
             if (trim) {
@@ -423,7 +423,7 @@ void process_single_barcode(
         
         // Check for barcode in 3' end
         slice(r.seq, target_slice, r.length - barcode_pos, r.length);
-        int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, r.length, b.fw_length, k);
+        int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, k);
         if (match_last_rv != -1) {
             counter++;
             int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
@@ -579,13 +579,13 @@ int main(int argc, char **argv) {
     
     NanomuxDatas nanomux_datas = {0};
     pthread_mutex_t s_mutex = PTHREAD_MUTEX_INITIALIZER;
-    for (int i = 0; i < barcodes.count; i++) {
+    for (size_t i = 0; i < barcodes.count; i++) {
         NanomuxData nanomux_data = {
             .barcode = barcodes.items[i],
             .reads = reads,
             .output = *output,
             .barcode_pos = *barcode_pos,
-            .k = *k,
+            .k = (int) *k,
             .trim = *trim,
             .S_FILE = S_FILE,
             .s_mutex = &s_mutex,
@@ -595,13 +595,13 @@ int main(int argc, char **argv) {
     // dual barcodes
     if (num_fields == 3) {
         nob_log(NOB_INFO, "Barcode file contains forward and reverse barcodes\n");
-        for (int i = 0; i < nanomux_datas.count; i++) {
+        for (size_t i = 0; i < nanomux_datas.count; i++) {
         	thpool_add_work(thpool, run_nanomux_dual, (void *)&nanomux_datas.items[i]);
         }
     // single barcode
     } else if (num_fields == 2) {
         nob_log(NOB_INFO, "Barcode file only contains one barcode\n");
-        for (int i = 0; i < nanomux_datas.count; i++) {
+        for (size_t i = 0; i < nanomux_datas.count; i++) {
         	thpool_add_work(thpool, run_nanomux_single, (void *)&nanomux_datas.items[i]);
         }
     } else {

@@ -26,6 +26,7 @@ int main(int argc, char **argv)
 
     cmd.count = 0;
     nob_cmd_append(&cmd, "gcc");
+    nob_cmd_append(&cmd, "-Wall", "-Wextra");
     nob_cmd_append(&cmd, "-o", "nanomux");
     nob_cmd_append(&cmd, "nanomux.c", "thpool.c");
     nob_cmd_append(&cmd, "-lz", "-lpthread", "-lm", "-O3");
