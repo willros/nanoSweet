@@ -104,7 +104,6 @@ typedef struct {
     const char *seq;
     const char *name;
     const char *qual;
-    int length;
 } Read;
 
 typedef struct {
@@ -139,7 +138,7 @@ typedef struct {
 } NanomuxDatas;
 
 KSEQ_INIT(gzFile, gzread)
-Reads parse_fastq(const char *fastq_file_path, int read_len_min, int read_len_max) {
+Reads parse_fastq(const char *fastq_file_path) {
     
     gzFile fp = gzopen(fastq_file_path, "r"); 
     if (!fp) {
@@ -152,16 +151,11 @@ Reads parse_fastq(const char *fastq_file_path, int read_len_min, int read_len_ma
     Reads reads = {0};
     
     while ((l = kseq_read(seq)) >= 0) { 
-        int length = strlen(seq->seq.s);
-        
-        if (length >= read_len_min && length <= read_len_max) {
-            Read read = {0};
-            read.seq = strdup(seq->seq.s);
-            read.name = strdup(seq->name.s);
-            read.qual = strdup(seq->qual.s);
-            read.length = length;
-            nob_da_append(&reads, read);
-        }
+        Read read = {0};
+        read.seq = strdup(seq->seq.s);
+        read.name = strdup(seq->name.s);
+        read.qual = strdup(seq->qual.s);
+        nob_da_append(&reads, read);
     }
     
     kseq_destroy(seq); 
@@ -264,9 +258,10 @@ void slice(const char* src, char* dest, size_t start, size_t end) {
 
 int append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end) {
     int result = 0;
+    int length = strlen(read->seq);
 
     if (start < 0) start = 0;
-    if (end > (int)read->length) end = read->length;
+    if (end > length) end = length;
     size_t trimmed_length = end - start;
 
     // make sure that we have enough space for the name if the read is short
@@ -333,22 +328,23 @@ void process_dual_barcode(
     
     for (size_t j = 0; j < reads.count; ++j) {
         Read r = reads.items[j];
+        int length = strlen(r.seq);
         
         // fw ------ revcomp(rv)
         // fw
         slice(r.seq, target_slice, 0, barcode_pos);
         int match_first_fw = levenshtein_distance(target_slice, b.fw, k); 
         if (match_first_fw != -1) {
-            slice(r.seq, target_slice, r.length - barcode_pos, r.length);
+            slice(r.seq, target_slice, length - barcode_pos, length);
             // revcomp(rv)
             int match_last_fw = levenshtein_distance(target_slice, b.rv_comp, k);
             if (match_last_fw != -1) {
                 counter++;
-                int slice_end = r.length - barcode_pos + match_last_fw - b.rv_length;
+                int slice_end = length - barcode_pos + match_last_fw - b.rv_length;
                 if (trim) {
                     append_read_to_gzip_fastq(new_fastq, &r, match_first_fw, slice_end);
                 } else {
-                    append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
+                    append_read_to_gzip_fastq(new_fastq, &r, 0, length);
                 }
                 continue;
             }
@@ -358,16 +354,16 @@ void process_dual_barcode(
         slice(r.seq, target_slice, 0, barcode_pos);
         int match_first_rv = levenshtein_distance(target_slice, b.rv, k); 
         if (match_first_rv != -1) {
-            slice(r.seq, target_slice, r.length - barcode_pos, r.length);
+            slice(r.seq, target_slice, length - barcode_pos, length);
             // revcomp(rv)
             int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, k);
             if (match_last_rv != -1) {
                 counter++;
-                int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
+                int slice_end = length - barcode_pos + match_last_rv - b.fw_length;
                 if (trim) {
                     append_read_to_gzip_fastq(new_fastq, &r, match_first_rv, slice_end);
                 } else {
-                    append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
+                    append_read_to_gzip_fastq(new_fastq, &r, 0, length);
                 }
             }
         }
@@ -407,6 +403,7 @@ void process_single_barcode(
     
     for (size_t j = 0; j < reads.count; ++j) {
         Read r = reads.items[j];
+        int length = strlen(r.seq);
         
         // Check for barcode in 5' end
         slice(r.seq, target_slice, 0, barcode_pos);
@@ -414,23 +411,23 @@ void process_single_barcode(
         if (match_first_fw != -1) {
             counter++;
             if (trim) {
-                append_read_to_gzip_fastq(new_fastq, &r, match_first_fw, r.length);
+                append_read_to_gzip_fastq(new_fastq, &r, match_first_fw, length);
             } else {
-                append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
+                append_read_to_gzip_fastq(new_fastq, &r, 0, length);
             }
             continue;
         }
         
         // Check for barcode in 3' end
-        slice(r.seq, target_slice, r.length - barcode_pos, r.length);
+        slice(r.seq, target_slice, length - barcode_pos, length);
         int match_last_rv = levenshtein_distance(target_slice, b.fw_comp, k);
         if (match_last_rv != -1) {
             counter++;
-            int slice_end = r.length - barcode_pos + match_last_rv - b.fw_length;
+            int slice_end = length - barcode_pos + match_last_rv - b.fw_length;
             if (trim) {
                 append_read_to_gzip_fastq(new_fastq, &r, 0, slice_end);
             } else {
-                append_read_to_gzip_fastq(new_fastq, &r, 0, r.length);
+                append_read_to_gzip_fastq(new_fastq, &r, 0, length);
             }
         }
     }
@@ -485,8 +482,6 @@ int main(int argc, char **argv) {
     char **barcode_file = flag_str("b", "", "Path to barcode file (MANDATORY)");
     char **fastq_file = flag_str("f", "", "Path to fastq file (MANDATORY)");
     char **output = flag_str("o", "", "Name of output folder (MANDATORY)");
-    size_t *read_len_min = flag_size("r", 1, "Minimum length of read");
-    size_t *read_len_max = flag_size("R", 1000*1000, "Maximum length of read");
     size_t *barcode_pos = flag_size("p", 50, "Position of barcode");
     size_t *k = flag_size("k", 0, "Number of misatches allowed");
     bool *trim = flag_bool("t", true, "Trim reads from adapters or not");
@@ -510,12 +505,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // command line parsing done
-
-    printf("\n");
     nob_log(NOB_INFO, "Running nanomux");
-    nob_log(NOB_INFO, "Read len min: %i", *read_len_min);
-    nob_log(NOB_INFO, "Read len max: %i", *read_len_max);
     nob_log(NOB_INFO, "Barcode position: 0 -> %zu", *barcode_pos);
     nob_log(NOB_INFO, "k: %i", *k);
     nob_log(NOB_INFO, "Trim option: %i", *trim);
@@ -550,8 +540,6 @@ int main(int argc, char **argv) {
     fprintf(LOG_FILE, "Nanomux\n\n");
     fprintf(LOG_FILE, "Barcodes: %s\n", *barcode_file);
     fprintf(LOG_FILE, "Fastq: %s\n", *fastq_file);
-    fprintf(LOG_FILE, "Read len min: %i\n", (int) *read_len_min);
-    fprintf(LOG_FILE, "Read len max: %i\n", (int) *read_len_max);
     fprintf(LOG_FILE, "Barcode position: %zu\n", *barcode_pos);
     fprintf(LOG_FILE, "k: %i\n", (int) *k);
     fprintf(LOG_FILE, "Output folder: %s\n", *output);
@@ -568,7 +556,7 @@ int main(int argc, char **argv) {
     int num_fields = num_barcode_fields(*barcode_file);
     
     nob_log(NOB_INFO, "Parsing fastq file %s", *fastq_file);
-    Reads reads = parse_fastq(*fastq_file, *read_len_min, *read_len_max);
+    Reads reads = parse_fastq(*fastq_file);
     nob_log(NOB_INFO, "Number of reads after filtering: %zu", reads.count);
     fprintf(LOG_FILE, "Number of reads after filtering: %zu\n", reads.count);
     printf("\n");
