@@ -21,10 +21,8 @@
 
 #define NOB_IMPLEMENTATION
 #include "nob.h"
-
 #define FLAG_IMPLEMENTATION
 #include "./flag.h"
-
 #include "kseq.h"
 #include "thpool.h"
 
@@ -139,7 +137,6 @@ typedef struct {
 
 KSEQ_INIT(gzFile, gzread)
 Reads parse_fastq(const char *fastq_file_path) {
-    
     gzFile fp = gzopen(fastq_file_path, "r"); 
     if (!fp) {
         nob_log(NOB_INFO, "Failed to open fastq file, exiting");
@@ -149,6 +146,9 @@ Reads parse_fastq(const char *fastq_file_path) {
     kseq_t *seq = kseq_init(fp); 
     int l;
     Reads reads = {0};
+
+    int counter = 1;
+    int print_read_number = 500 * 1000;
     
     while ((l = kseq_read(seq)) >= 0) { 
         Read read = {0};
@@ -156,6 +156,9 @@ Reads parse_fastq(const char *fastq_file_path) {
         read.name = strdup(seq->name.s);
         read.qual = strdup(seq->qual.s);
         nob_da_append(&reads, read);
+
+        if (counter % print_read_number == 0) nob_log(NOB_INFO, "Parsed: %i reads", counter);
+        counter++;
     }
     
     kseq_destroy(seq); 
@@ -269,7 +272,7 @@ int append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end) {
     char *buffer = (char *)malloc(buffer_size);
 
     if (!buffer) {
-        nob_log(NOB_ERROR, "Memory allocation failed");
+        nob_log(NOB_ERROR, "Memory allocation failed, buy more RAM lol");
         return 1;
     }
 
@@ -281,7 +284,7 @@ int append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end) {
 
     len = snprintf(buffer, buffer_size, "%.*s\n", (int)trimmed_length, read->seq + start);
     if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write trimmed sequence to gzip file");
+        nob_log(NOB_ERROR, "Failed to write sequence to gzip file");
         nob_return_defer(1);
     }
 
@@ -293,7 +296,7 @@ int append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end) {
 
     len = snprintf(buffer, buffer_size, "%.*s\n", (int)trimmed_length, read->qual + start);
     if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write trimmed quality to gzip file");
+        nob_log(NOB_ERROR, "Failed to write quality to gzip file");
         nob_return_defer(1);
     }
 
@@ -320,7 +323,7 @@ void process_dual_barcode(
     
     gzFile new_fastq = gzopen(fastq_name, "ab");
     if (!new_fastq) {
-        nob_log(NOB_INFO, "failed to open new fastq_file for appending, exiting");
+        nob_log(NOB_INFO, "failed to open new fastq file for appending, exiting");
         exit(1);
     }
     
@@ -472,9 +475,18 @@ void run_nanomux_single(void *arg) {
     );
 }
 
-void usage(FILE *stream) {
-    flag_print_options(stream);
+void print_barcodes_documentation(void) {
+    printf("\nYOUR BARCODE FILE IS WRONG!\n");
+    printf("You can use either single barcodes, or dual barcodes\n\n");
+    printf("Dual barcodes example:\n");
+    printf("barcode1,ACTATCTACTA,GAGCATGTCGTA\n");
+    printf("barcode2,AGCGTATGCTGGTA,AGCATGCTATCG\n\n");
+    printf("Single barcode example:\n");
+    printf("barcode1,ACTATCTACTA\n");
+    printf("barcode2,AGCGTATGCTGGTA\n");
 }
+
+#define LOG_FILE_CAP 512
 
 int main(int argc, char **argv) {    
 
@@ -483,25 +495,25 @@ int main(int argc, char **argv) {
     char **fastq_file = flag_str("f", "", "Path to fastq file (MANDATORY)");
     char **output = flag_str("o", "", "Name of output folder (MANDATORY)");
     size_t *barcode_pos = flag_size("p", 50, "Position of barcode");
-    size_t *k = flag_size("k", 0, "Number of misatches allowed");
+    size_t *k = flag_size("k", 0, "Number of mismatches allowed");
     bool *trim = flag_bool("t", true, "Trim reads from adapters or not");
     size_t *num_threads = flag_size("j", 1, "Number of threads to use");
     bool *help = flag_bool("help", false, "Print this help to stdout and exit with 0");
 
     if (!flag_parse(argc, argv)) {
-        usage(stderr);
+        flag_print_options(stderr);
         flag_print_error(stderr);
         return 1;
     }
 
     if (*help) {
-        usage(stdout);
+        flag_print_options(stderr);
         return 0;
     }
 
     if (strcmp(*barcode_file, "") == 0 || strcmp(*fastq_file, "") == 0 || strcmp(*output, "") == 0) {
         nob_log(NOB_ERROR, "At least one of the mandatory arguments are missing");
-        usage(stderr);
+        flag_print_options(stderr);
         return 1;
     }
 
@@ -517,26 +529,24 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // create log file
-    char log_file[256];
+    char log_file[LOG_FILE_CAP];
     snprintf(log_file, sizeof(log_file), "%s/nanomux.log", *output);
     FILE *LOG_FILE = fopen(log_file, "ab");
     if (LOG_FILE == NULL) {
-        nob_log(NOB_ERROR, "Could create log file");
+        nob_log(NOB_ERROR, "Could NOT create log file");
         return 1;
     }
     
-    // create summary file
-    char summary_file[256];
+    char summary_file[LOG_FILE_CAP];
     snprintf(summary_file, sizeof(summary_file), "%s/nanomux_matches.csv", *output);
     FILE *S_FILE = fopen(summary_file, "ab");
     if (S_FILE == NULL) {
-        nob_log(NOB_ERROR, "Could not create summary file");
+        nob_log(NOB_ERROR, "Could NOT create summary file");
         fclose(LOG_FILE);
         return 1;
     }
-    fprintf(S_FILE, "barcode,matches\n");
     
+    fprintf(S_FILE, "barcode,matches\n");
     fprintf(LOG_FILE, "Nanomux\n\n");
     fprintf(LOG_FILE, "Barcodes: %s\n", *barcode_file);
     fprintf(LOG_FILE, "Fastq: %s\n", *fastq_file);
@@ -553,12 +563,23 @@ int main(int argc, char **argv) {
     
     // If the number fields in barcode file is 3 --> the file contains fw and rv
     // If the number fields in barcode file is 2 --> the file contains only fw
+    char *barcode_type;
     int num_fields = num_barcode_fields(*barcode_file);
+    if (num_fields == 2) {
+        barcode_type = "single";
+        nob_log(NOB_INFO, "Barcode file contains single barcode\n");
+    } else if (num_fields == 3) {
+        barcode_type = "dual";
+        nob_log(NOB_INFO, "Barcode file contains dual barcodes\n");
+    } else {
+        print_barcodes_documentation();
+        return 1;
+    }
     
     nob_log(NOB_INFO, "Parsing fastq file %s", *fastq_file);
     Reads reads = parse_fastq(*fastq_file);
-    nob_log(NOB_INFO, "Number of reads after filtering: %zu", reads.count);
-    fprintf(LOG_FILE, "Number of reads after filtering: %zu\n", reads.count);
+    nob_log(NOB_INFO, "Number of reads: %zu", reads.count);
+    fprintf(LOG_FILE, "Number of reads: %zu\n", reads.count);
     printf("\n");
 
     nob_log(NOB_INFO, "Generating threadpool with %i threads", *num_threads);
@@ -573,27 +594,25 @@ int main(int argc, char **argv) {
             .reads = reads,
             .output = *output,
             .barcode_pos = *barcode_pos,
-            .k = (int) *k,
+            .k = (int)*k,
             .trim = *trim,
             .S_FILE = S_FILE,
             .s_mutex = &s_mutex,
         };
         nob_da_append(&nanomux_datas, nanomux_data);
     }
-    // dual barcodes
-    if (num_fields == 3) {
-        nob_log(NOB_INFO, "Barcode file contains forward and reverse barcodes\n");
+    
+    if (strcmp(barcode_type, "dual") == 0) {
         for (size_t i = 0; i < nanomux_datas.count; i++) {
         	thpool_add_work(thpool, run_nanomux_dual, (void *)&nanomux_datas.items[i]);
         }
-    // single barcode
-    } else if (num_fields == 2) {
-        nob_log(NOB_INFO, "Barcode file only contains one barcode\n");
+    } else if (strcmp(barcode_type, "single") == 0) {
         for (size_t i = 0; i < nanomux_datas.count; i++) {
         	thpool_add_work(thpool, run_nanomux_single, (void *)&nanomux_datas.items[i]);
         }
     } else {
-        nob_log(NOB_ERROR, "Your barcode file is wrong, please look at the documentation");
+        // unreachable
+        print_barcodes_documentation();
         return 1;
     }
 
@@ -608,9 +627,9 @@ int main(int argc, char **argv) {
 
     fclose(S_FILE);
     fclose(LOG_FILE);
-    
+
     printf("\n");
-    nob_log(NOB_INFO, "nanomux done!");
+    nob_log(NOB_INFO, "nanomux done!\n");
     
     return 0;
 }
