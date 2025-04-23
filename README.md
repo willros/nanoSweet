@@ -16,7 +16,7 @@ $ ./nob
 
 ## test nanomux
 ```bash
-$ ./nanomux -b tests/bc_test.csv -f tests/test.fastq -r 600 -R 2000 -p 200 -k 1 -o new_nanomux -t trim -s split -j 4
+$ ./nanomux -f tests/test.fastq -b tests/bc_test.csv -p 200 -k 2 -t -j 3 -o testing
 ```
 
 ## test nanotrim
@@ -32,22 +32,31 @@ $ ./nanodup -i tests/test.fastq -o test_nanodup
 ## nanomux
 Run `./nanomux` to get the help message:
 ```bash
-[USAGE]: nanomux 
-   -b <barcode>             Path to barcode file.
-   -f <fastq>               Path to fastq file.
-   -r <read_len_min>        Minimum length of read.
-   -R <read_len_max>        Maximum length of read.
-   -p <barcode_position>    Position of barcode.
-   -k <mismatches>          Number of misatches allowed.
-   -o <output>              Name of output folder.
-   -t <trim_option>         Trim reads from adapters or not?                      [Options]: trim | notrim.
-   -s <split_option>        Split concatenated reads based on adapter occurance?. [Options]: split | nosplit.
-   -j <threads>             Number of threads to use.                             Default: 1
+[ERROR] At least one of the mandatory arguments are missing
+    -b
+        Path to barcode file (MANDATORY)
+        Default: 
+    -f
+        Path to fastq file (MANDATORY)
+        Default: 
+    -o
+        Name of output folder (MANDATORY)
+        Default: 
+    -p
+        Position of barcode
+        Default: 50
+    -k
+        Number of mismatches allowed
+        Default: 0
+    -t
+        Trim reads from adapters or not
+        Default: true
+    -j
+        Number of threads to use
+        Default: 1
+    -help
+        Print this help to stdout and exit with 0
 ```
-* `barcode_pos`: where to search for the barcode in the ends. if barcode_pos == 200 and the read length is 1000, the barcodes will be searched for from position 0 -> 200 and 800 -> 1000.
-* `k`: allowed number of mismatches
-* `trim_option`: To trim the reads to the left and right of the found barcode.
-* `split_option`: Try to split reads longer than 2500 if an adapter sequence is found in the middle. One splitted read results in two new reads, with the suffix `_1` and `_2`.
 
 `barcode_file.csv` **MUST** have the follwing shape:
 ### Dual barcodes:
