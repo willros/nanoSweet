@@ -1,34 +1,30 @@
 #define NOB_IMPLEMENTATION
+#define NOB_STRIP_PREFIX
 #include "nob.h"
 
-// add this compiler option for shadow stack: -mshstk in gcc
-// add -static to compiler option
+Nob_Cmd cmd = {0};
 
 int main(int argc, char **argv)
 {
     NOB_GO_REBUILD_URSELF(argc, argv);
 
-    const char *program = nob_shift_args(&argc, &argv);
+    cmd_append(&cmd, "cc");
+    cmd_append(&cmd, "-o", "nanodup");
+    cmd_append(&cmd, "nanodup.c", "thpool.c");
+    cmd_append(&cmd, "-lz", "-lpthread", "-O3");
+    if (!cmd_run(&cmd)) return 1;
 
-    Nob_Cmd cmd = {0};
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-o", "nanodup");
-    nob_cmd_append(&cmd, "nanodup.c", "thpool.c");
-    nob_cmd_append(&cmd, "-lz", "-lpthread", "-O3");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+    cmd_append(&cmd, "cc");
+    cmd_append(&cmd, "-o", "nanotrim");
+    cmd_append(&cmd, "nanotrim.c", "thpool.c");
+    cmd_append(&cmd, "-lz", "-lm", "-lpthread", "-O3");
+    if (!cmd_run(&cmd)) return 1;
 
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-o", "nanotrim");
-    nob_cmd_append(&cmd, "nanotrim.c", "thpool.c");
-    nob_cmd_append(&cmd, "-lz", "-lm", "-lpthread", "-O3");
-    if (!nob_cmd_run_sync(cmd)) return 1;
 
-    cmd.count = 0;
-    nob_cmd_append(&cmd, "gcc");
-    nob_cmd_append(&cmd, "-o", "nanomux");
-    nob_cmd_append(&cmd, "nanomux.c", "thpool.c");
-    nob_cmd_append(&cmd, "-lz", "-lpthread", "-lm", "-O3");
-    if (!nob_cmd_run_sync(cmd)) return 1;
+    cmd_append(&cmd, "cc");
+    cmd_append(&cmd, "-o", "nanomux");
+    cmd_append(&cmd, "nanomux.c", "thpool.c");
+    cmd_append(&cmd, "-lz", "-lpthread", "-lm", "-O3");
+    if (!cmd_run(&cmd)) return 1;
     return 0;
 }

@@ -1,360 +1,362 @@
-#define NOB_IMPLEMENTATION
-#include "nob.h"
+#define COMMON_IMPLEMENTATION
+#include "common.h"
+#define FLAG_IMPLEMENTATION
+#include "flag.h"
 #include <zlib.h>
 #include "kseq.h"
 #include <stdint.h>
-#include <pthread.h>
 #include <stdio.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <math.h>
 #include "thpool.h"
 #include <string.h>
 
-char *basename(char const *path) {
-    char *s = strrchr(path, '/');
-    if (!s)
-        return strdup(path);
-    else
-        return strdup(s + 1);
-}
+KSEQ_INIT(gzFile, gzread)
+#define READ_BUFFER (2 * 1000)
 
 typedef struct {
-    int min_qual;
-    int min_read_len;
-    int max_read_len;
-    char *in_file;
-    char *out_file;
-    pthread_mutex_t *print_mutex;
-    FILE *log_file;
-} File; 
+    size_t min_qual;
+    size_t min_len;
+    size_t max_len;
+
+    const char *in_file;
+    const char *out_file;
+
+    size_t raw_reads;
+    size_t too_short;
+    size_t too_long;
+    size_t too_bad;
+    size_t qualified_reads;
+} Fastq_File; 
 
 typedef struct {
-    File *items;
+    Fastq_File *items;
     size_t count;
     size_t capacity;
-} Files;
+} Fastq_Files;
 
-double average_qual(const char *quals, size_t len) {
-    double probability_sum = 0.0;
-    for (size_t i = 0; i < len; i++) {
-        int phred_score = quals[i] - 33;  
-        probability_sum += pow(10.0, phred_score / -10.0);
-    }
-    return log10(probability_sum / len) * -10.0;
-}
-
-int append_read_to_gzip_fastq(gzFile gzfp, const char *name, const char *seq, const char *qual) {
-    int result = 0;
-    size_t max_len = strlen(seq);
-    size_t buffer_size = max_len + 10; 
-    char *buffer = (char *)malloc(buffer_size);
-
-    if (!buffer) {
-        nob_log(NOB_ERROR, "Memory allocation failed");
-        return 1;
-    }
-
-    int len = snprintf(buffer, buffer_size, "@%s\n", name);
-    if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write to gzip file");
-        nob_return_defer(1);
-    }
-
-    len = snprintf(buffer, buffer_size, "%s\n", seq);
-    if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write to gzip file");
-        nob_return_defer(1);
-    }
-
-    len = snprintf(buffer, buffer_size, "+\n");
-    if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write to gzip file");
-        nob_return_defer(1);
-    }
-
-    len = snprintf(buffer, buffer_size, "%s\n", qual);
-    if (gzwrite(gzfp, buffer, len) != len) {
-        nob_log(NOB_ERROR, "Failed to write to gzip file");
-        nob_return_defer(1);
-    }
-
-defer:
-    free(buffer);
-    return result;
-}
-
-KSEQ_INIT(gzFile, gzread)
-bool parse_fastq(
-    const char *fastq_file_path, 
-    int read_len_min, 
-    int read_len_max, 
-    int min_qual, 
-    const char *out_path,
-    pthread_mutex_t *print_mutex,
-    FILE *log_file
-) {
-    bool result = true;
-    gzFile fastq_file = gzopen(fastq_file_path, "r"); 
-    if (!fastq_file) {
-        nob_log(NOB_ERROR, "Failed to open %s file, exiting", fastq_file_path);
-        nob_return_defer(false);
-    }
-
-    gzFile out_file = gzopen(out_path, "wb"); 
-    if (!out_file) {
-        nob_log(NOB_ERROR, "Failed to open %s file, exiting", out_path);
-        nob_return_defer(false);
-    }
-    
-    kseq_t *seq = kseq_init(fastq_file); 
-    if (seq == NULL) {
-        nob_log(NOB_ERROR, "Could not initialize %s file, exiting", fastq_file_path);
-        nob_return_defer(false);
-    }
-
-    int raw_reads = 0;
-    int to_short = 0;
-    int to_long = 0;
-    int to_bad = 0;
-    int qualified_reads = 0;
-    while (kseq_read(seq) >= 0) { 
-        raw_reads++;
-        int length = strlen(seq->seq.s);
-        if (!(length >= read_len_min)) {
-            to_short++;
-            continue;
-        }
-        if (!(length <= read_len_max)) {
-            to_long++;
-            continue;
-        }
-        double average = average_qual(seq->qual.s, length);
-        if (!(average >= min_qual)) {
-            to_bad++;
-            continue;
-        }
-        qualified_reads++;
-        append_read_to_gzip_fastq(
-            out_file, seq->name.s, seq->seq.s, seq->qual.s
-        );
-    }
-    
-    pthread_mutex_lock(print_mutex);
-    nob_log(
-        NOB_INFO, 
-        "%-10s: %i raw reads (%i passed) --> To short: %-5i | To long: %-5i | To low quality: %-5i", 
-        fastq_file_path, raw_reads, qualified_reads, to_short, to_long, to_bad
-    );
-    fprintf(log_file, "%s,%i,%i,%i,%i,%i\n", fastq_file_path, raw_reads, qualified_reads, to_short, to_long, to_bad);
-    pthread_mutex_unlock(print_mutex);
-
-defer:
-    if (seq) kseq_destroy(seq); 
-    if (fastq_file) gzclose(fastq_file); 
-    if (out_file) gzclose(out_file); 
-    return result;
-}
-
-void task_parse_fastq_file(void *arg) {
-    File *file = (File *)arg;
-
-    if (!parse_fastq(file->in_file, file->min_read_len, file->max_read_len, file->min_qual, file->out_file, file->print_mutex, file->log_file)) {
-        return;
-    }
-}
-
-bool is_fastq(const char *file) {
-    return strstr(file, "fastq") || strstr(file, "fq");
-}
-
-bool must_be_digit(const char *arg) {
-    for(; *arg != '\0'; arg++) {
-        if (!isdigit(*arg)) return false;
-    }
-    return true;
-}
-
-char *usage = 
-"[USAGE]: nanotrim -i <input> [options]\n"
-"   -i    <input>             Path of folder or file\n"
-"   -o    <output>            Name of output folder.\n"
-"   -r    <read_length_min>   Minium length of read.    Optional: Default 1\n"
-"   -R    <read_length_max>   Minium length of read.    Optional: Default INT_MAX\n"
-"   -q    <quality>           Minimum quality of read.  Optional: Default 1\n"
-"   -t    <threads>           Number of threads to use. Optional: Default 1\n";
+typedef struct {
+    Fastq_File *f;
+    Reads *reads;
+    size_t start;
+    size_t end;
+    gzFile out_file;
+    pthread_mutex_t *print_mutex;
+} Thread_Data;
 
 
-int main(int argc, char **argv) {
-    
-    // required args
-    bool i_arg = false;
-    char *input;
-    char *output;
-    bool o_arg = false;
-
-    // optional args
-    int r_arg = 1, q_arg = 1, t_arg = 1, R_arg = INT32_MAX;
-    char c;
-    while ((c = getopt(argc, argv, "i:o:r:R:q:t:")) != -1) {
-        switch (c) {
-            case 'i':
-                i_arg = true;
-                input = optarg;
-                break;
-            case 'o':
-                o_arg = true;
-                output = optarg;
-                break;
-            case 'r':
-                if (!must_be_digit(optarg)) {
-                    nob_log(NOB_ERROR, "-r must be digit");
-                    nob_log(NOB_ERROR, "%s", usage);
-                    return 1;
-                }
-                r_arg = atoi(optarg);
-                break;
-            case 'R':
-                if (!must_be_digit(optarg)) {
-                    nob_log(NOB_ERROR, "-R must be digit");
-                    nob_log(NOB_ERROR, "%s", usage);
-                    return 1;
-                }
-                R_arg = atoi(optarg);
-                break;
-            case 'q':
-                if (!must_be_digit(optarg)) {
-                    nob_log(NOB_ERROR, "-q must be digit");
-                    nob_log(NOB_ERROR, "%s", usage);
-                    return 1;
-                }
-                q_arg = atoi(optarg);
-                break;
-            case 't':
-                if (!must_be_digit(optarg)) {
-                    nob_log(NOB_ERROR, "-t must be digit");
-                    nob_log(NOB_ERROR, "%s", usage);
-                    return 1;
-                }
-                t_arg = atoi(optarg);
-                break;
-        }
-    }
-    if (!(i_arg)) {
-        nob_log(NOB_ERROR, "You must provide the input path");
-        nob_log(NOB_ERROR, "%s", usage);
-        return 1;
-    }
-    if (!(o_arg)) {
-        nob_log(NOB_ERROR, "You must provide the output path");
-        nob_log(NOB_ERROR, "%s", usage);
-        return 1;
-    }
-    
-    nob_log(NOB_INFO, "Input:               %20s", input);
-    nob_log(NOB_INFO, "Output:              %20s", output);
-    nob_log(NOB_INFO, "Minimum read length: %20i", r_arg);
-    nob_log(NOB_INFO, "Maximum read length: %20i", R_arg);
-    nob_log(NOB_INFO, "Minimum quality:     %20i", q_arg);
-    nob_log(NOB_INFO, "Number of threads:   %20i", t_arg);
-
-    if (!nob_mkdir_if_not_exists(output)) {
-        nob_log(NOB_ERROR, "exiting");
-        return 1;
-    }
-
+bool parse_input( const char *input, const char *output, Fastq_Files *fastq_files, size_t min_qual, size_t min_len, size_t max_len ) {
     Nob_File_Type type = nob_get_file_type(input);
     Nob_File_Paths files = {0};
-    Files fastq_files = {0};
-
-    char log_file[256]; 
-    snprintf(log_file, sizeof(log_file), "%s/nanotrim_log.csv", output);
-    FILE *LOG_FILE = fopen(log_file, "ab");
-    if (LOG_FILE == NULL) {
-        nob_log(NOB_ERROR, "Could create log file");
-        return 1;
-    }
-    fprintf(LOG_FILE, "file,raw_reads,passed_reads,short,long,bad_quality\n");
-    
-    pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
 
     switch (type) {
         case NOB_FILE_DIRECTORY: {
-            nob_log(NOB_INFO, "`%s` is a directory", input);
+            nob_log(NOB_INFO, "%s is a directory", input);
+
             if (!nob_read_entire_dir(input, &files)) {
-                nob_log(NOB_ERROR, "Failed to read directory `%s`", input);
-                return 1;
+                nob_log(NOB_ERROR, "Failed to read directory %s", input);
+                return false;
             }
 
-            char realpath[512];
+            char real_path[512];
             char outfile[512];
+
             for (size_t i = 0; i < files.count; ++i) {
                 const char *file = files.items[i];
-
                 if (strcmp(file, ".") == 0) continue;
                 if (strcmp(file, "..") == 0) continue;
                 if (*file == '.') continue;
                 if (!is_fastq(file)) continue;
 
                 // realpath and outfile
-                snprintf(realpath, sizeof(realpath), "%s/%s", input, file);
+                snprintf(real_path, sizeof(real_path), "%s/%s", input, file);
                 snprintf(outfile, sizeof(outfile), "%s/%s_nanotrim.fq.gz", output, file);
 
-                File fastq_file = {
-                    .min_qual = q_arg,
-                    .min_read_len = r_arg,
-                    .max_read_len = R_arg,
-                    .in_file = strdup(realpath),
+                Fastq_File fastq_file = {
+                    .min_qual = min_qual,
+                    .min_len = min_len,
+                    .max_len = max_len,
+                    .in_file = strdup(real_path),
                     .out_file = strdup(outfile),
-                    .print_mutex = &print_mutex,
-                    .log_file = LOG_FILE
+                    .raw_reads = 0,
+                    .too_short = 0,
+                    .too_long = 0,
+                    .too_bad = 0,
+                    .qualified_reads = 0,
                 };
-                nob_da_append(&fastq_files, fastq_file);
+                nob_da_append(fastq_files, fastq_file);
             }
+
             break;
         }
+
         case NOB_FILE_REGULAR: {
             if (!is_fastq(input)) {
-                nob_log(NOB_ERROR, "`%s` is not a fastq file...", input);
-                return 1;
+                nob_log(NOB_ERROR, "%s is not a fastq file.", input);
+                return false;
             }
-            nob_log(NOB_INFO, "`%s` is a file", input);
+
+            nob_log(NOB_INFO, "%s is a file", input);
 
             char outfile[512];
             char *base_name = basename(input);
             snprintf(outfile, sizeof(outfile), "%s/%s.filtered", output, base_name);
 
-            File fastq_file = {
-                .min_qual = q_arg,
-                .min_read_len = r_arg,
-                .max_read_len = R_arg,
+            Fastq_File fastq_file = {
+                .min_qual = min_qual,
+                .min_len = min_len,
+                .max_len = max_len,
                 .in_file = strdup(input),
                 .out_file = strdup(outfile),
-                .print_mutex = &print_mutex,
-                .log_file = LOG_FILE
+                .raw_reads = 0,
+                .too_short = 0,
+                .too_long = 0,
+                .too_bad = 0,
+                .qualified_reads = 0,
             };
-            nob_da_append(&fastq_files, fastq_file);
+            nob_da_append(fastq_files, fastq_file);
+
             break;
         }
+
         default:
-            nob_log(NOB_ERROR, "input: `%s` has an unknown type", input);
-			return 1;
+            nob_log(NOB_ERROR, "input: %s has an unknown type", input);
+            return false;
+    }
+
+    nob_da_free(files);
+    return true;
+}
+
+
+void parse_fastq(void *arg) 
+{
+    Thread_Data *td = (Thread_Data *)arg;
+    size_t local_raw = 0;
+    size_t local_short = 0;
+    size_t local_long = 0;
+    size_t local_bad = 0;
+    size_t local_passed = 0;
+
+    Reads *reads = td->reads;
+    Fastq_File *f = td->f;
+
+    for (size_t idx = td->start; idx < td->end && idx < reads->count; idx++) {
+        Read cur_read = reads->items[idx];
+        local_raw++;
+
+        if (cur_read.len < f->min_len) { local_short++; continue; }
+        if (cur_read.len > f->max_len) { local_long++; continue; }
+
+        if (average_qual(cur_read.qual, cur_read.len) < (double)f->min_qual) { local_bad++; continue; }
+
+        pthread_mutex_lock(td->print_mutex);
+            if (!append_read_to_gzip_fastq(td->out_file, &cur_read, 0, cur_read.len)) {
+                // If append fails, unlock then exit
+                pthread_mutex_unlock(td->print_mutex);
+                exit(1);
+            }
+            f->qualified_reads++;
+        pthread_mutex_unlock(td->print_mutex);
+        local_passed++;
+    }
+
+    pthread_mutex_lock(td->print_mutex);
+        f->raw_reads += local_raw;
+        f->too_short += local_short;
+        f->too_long += local_long;
+        f->too_bad += local_bad;
+    pthread_mutex_unlock(td->print_mutex);
+
+    free(td);
+}
+
+
+int main(int argc, char **argv) {
+
+    // flag.h arguments
+    char **input = flag_str("f", "", "Path to input folder or file (MANDATORY)");
+    char **out_dir = flag_str("o", "", "Name of output folder (MANDATORY)");
+    size_t *min_len = flag_size("r", 0, "Minimum read length");
+    size_t *max_len = flag_size("R", 1000*1000, "Maximum read length");
+    size_t *min_qual = flag_size("q", 0, "Minimum quality");
+    size_t *num_threads = flag_size("j", 1, "Number of threads to use");
+    bool *help = flag_bool("help", false, "Print this help to stdout and exit with 0");
+    bool *version = flag_bool("v", false, "Print the current version");
+
+
+    if (!flag_parse(argc, argv)) {
+        flag_print_options(stderr);
+        flag_print_error(stderr);
+        return 1;
+    }
+
+    if (*help) {
+        flag_print_options(stderr);
+        return 0;
+    }
+
+    if (*version) {
+        print_version();
+        return 0;
+    }
+
+    if (strcmp(*input, "") == 0 || strcmp(*out_dir, "") == 0) {
+        nob_log(NOB_ERROR, "At least one of the mandatory arguments are missing");
+        flag_print_options(stderr);
+        return 1;
+    }
+    
+    if (!nob_mkdir_if_not_exists(*out_dir)) {
+        nob_log(NOB_ERROR, "exiting");
+        return 1;
+    }
+
+    nob_log(NOB_INFO, "Input:               %20s", *input);
+    nob_log(NOB_INFO, "Output:              %20s", *out_dir);
+    nob_log(NOB_INFO, "Minimum read length: %20zu", *min_len);
+    nob_log(NOB_INFO, "Maximum read length: %20zu", *max_len);
+    nob_log(NOB_INFO, "Minimum quality:     %20zu", *min_qual);
+    nob_log(NOB_INFO, "Number of threads:   %20zu", *num_threads);
+
+
+    // -------------- PARSE INPUT ---------------------
+    Fastq_Files fastq_files = {0};
+    if(!parse_input(*input, *out_dir, &fastq_files, *min_qual, *min_len, *max_len)) return 1;
+
+    // -------------- GENERATE THREAD POOL ---------------------
+    nob_log(NOB_INFO, "Generating threadpool with %zu threads", *num_threads);
+    threadpool thpool = thpool_init(*num_threads);
+
+    
+    // -------------- LOOP THROUGH EVERY INPUT FILE ---------------------
+    pthread_mutex_t print_mutex = PTHREAD_MUTEX_INITIALIZER;
+    Reads reads = {0};
+
+    for (size_t fi = 0; fi < fastq_files.count; fi++) {
+        Fastq_File *f = &fastq_files.items[fi];
+        gzFile in_file = gzopen(f->in_file, "r"); 
+        if (!in_file) {
+            nob_log(NOB_ERROR, "Failed to open %s file, exiting", f->in_file);
+            return 1;
+        }
+        gzFile out_file = gzopen(f->out_file, "ab"); 
+        if (!out_file) {
+            nob_log(NOB_ERROR, "Failed to open %s file, exiting", f->out_file);
+            gzclose(in_file);
+            return 1;
+        }
+        kseq_t *seq = kseq_init(in_file); 
+        if (seq == NULL) {
+            nob_log(NOB_ERROR, "Could not initialize %s file, exiting", f->in_file);
+            gzclose(in_file);
+            gzclose(out_file);
+            return 1;
+        }
+
+        // read loop
+        while (kseq_read(seq) >= 0) { 
+            Read read = {0};
+            read.seq = strdup(seq->seq.s);
+            read.name = strdup(seq->name.s);
+            read.qual = strdup(seq->qual.s);
+            read.len = (size_t)seq->seq.l;
+            read.first_slice = NULL;
+            read.last_slice = NULL;
+            
+            nob_da_append(&reads, read);
+        
+            if (reads.count >= READ_BUFFER) {
+                size_t total = reads.count;
+                size_t per_thread = total / *num_threads;
+                size_t rest = total % *num_threads;
+                size_t start = 0;
+                size_t end = 0;
+
+                for (size_t t = 0; t < *num_threads; t++) {
+                    Thread_Data *td = malloc(sizeof(Thread_Data));
+                    if (!td) {
+                        nob_log(NOB_ERROR, "Failed to allocate thread data");
+                        return 1;
+                    }
+                    
+                    start = end;
+                    end += per_thread;
+                    if (t == (*num_threads - 1)) end += rest; 
+
+                    td->f = f;
+                    td->reads = &reads;
+                    td->start = start;
+                    td->end = end;
+                    td->out_file = out_file;
+                    td->print_mutex = &print_mutex;
+                    
+            		thpool_add_work(thpool, parse_fastq, (void *)td);
+                }
+            	thpool_wait(thpool);
+
+                // Clean up reads
+                for (size_t ri = 0; ri < reads.count; ri++) free_read(reads.items[ri]);
+                reads.count = 0;
+            }
+        }
+
+        // ------------- IF ANY READS LEFT -------------------
+        if (reads.count > 0) {
+            size_t total = reads.count;
+            size_t per_thread = total / *num_threads;
+            size_t rest = total % *num_threads;
+            size_t start = 0;
+            size_t end = 0;
+            for (size_t t = 0; t < *num_threads; t++) {
+                Thread_Data *td = malloc(sizeof(Thread_Data));
+                if (!td) {
+                    nob_log(NOB_ERROR, "Failed to allocate thread data");
+                    return 1;
+                }
+                
+                start = end;
+                end += per_thread;
+                if (t == (*num_threads - 1)) end += rest;
+                td->f = f;
+                td->reads = &reads;
+                td->start = start;
+                td->end = end;
+                td->out_file = out_file;
+                td->print_mutex = &print_mutex;
+                
+                thpool_add_work(thpool, parse_fastq, (void *)td);
+            }
+            thpool_wait(thpool);
+
+            // Clean up reads
+            for (size_t ri = 0; ri < reads.count; ri++) free_read(reads.items[ri]);
+            reads.count = 0;
+        }
+        
+        kseq_destroy(seq); 
+        gzclose(in_file); 
+        gzclose(out_file); 
     }
 
 
-    nob_log(NOB_INFO, "Generating threadpool with %i threads", t_arg);
-    threadpool thpool = thpool_init(t_arg);
-
-    for (int i = 0; i < fastq_files.count; i++) {
-		thpool_add_work(thpool, task_parse_fastq_file, (void *)&fastq_files.items[i]);
+    // -------------- PRINT TO SUMMARY FILES ---------------------
+    FILE *LOG_FILE = open_summary_file(*out_dir, "nanotrim_log.csv");
+    fprintf(LOG_FILE, "file,raw_reads,passed_reads,short,long,bad_quality\n");
+    for (size_t i = 0; i < fastq_files.count; i++) {
+        Fastq_File f = fastq_files.items[i];
+        nob_log(
+            NOB_INFO, 
+            "%-10s: %zu raw reads (%zu passed) --> Too short: %-5zu | Too long: %-5zu | Too low quality: %-5zu", 
+            f.in_file, f.raw_reads, f.qualified_reads, f.too_short, f.too_long, f.too_bad);
+        fprintf(LOG_FILE, "%s,%zu,%zu,%zu,%zu,%zu\n", f.in_file, f.raw_reads, f.qualified_reads, f.too_short, f.too_long, f.too_bad);
     }
-
-	thpool_wait(thpool);
+    
+    // -------------- CLEAN UP ---------------------
 	thpool_destroy(thpool);
     pthread_mutex_destroy(&print_mutex);
-
     nob_da_free(fastq_files);
-    nob_da_free(files);
-
     fclose(LOG_FILE);
 
     return 0;
