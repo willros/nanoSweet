@@ -18,25 +18,85 @@ $ ./nob
 ```
 
 ## test nanomux
+
+To get the help message, run `./nanomux`:
 ```bash
-$ ./nanomux -b tests/bc_test.csv -f tests/test.fastq -r 600 -R 2000 -p 200 -k 1 -o new_nanomux -t trim -s split -j 4
+    -b
+        Path to barcode file (MANDATORY)
+        Default: 
+    -f
+        Path to fastq file (MANDATORY)
+        Default: 
+    -o
+        Name of output folder (MANDATORY)
+        Default: 
+    -p
+        Position of barcode
+        Default: 50
+    -k
+        Number of mismatches allowed
+        Default: 0
+    -t
+        Trim reads from adapters or not
+    -j
+        Number of threads to use
+        Default: 1
+    -help
+        Print this help to stdout and exit with 0
+    -v
+        Print the current version
+```
+
+Simple test command:
+```bash
+./nanomux -b tests/bc_test.csv -f tests/test.fastq -o TEST_NANOMUX -p 100 -k 1 -j 4 -t 
+```
+
+The barcode file **MUST** look like this:
+```csv
+# DUAL BARCODE EXAMPLE
+name,forward,reverse
+barcode1,ACTATCTACTA,GAGCATGTCGTA
+barcode2,AGCGTATGCTGGTA,AGCATGCTATCG
+
+# SINGLE BARCODE EXAMPLE
+name,forward
+barcode1,ACTATCTACTA
+barcode2,AGCGTATGCTGGTA
 ```
 
 ## test nanotrim
+To get the help message, run `./nanotrim`:
 ```bash
-$ ./nanotrim -i tests/test.fastq -r 2000 -R 10000 -q 20 -t 4 -o test_nanotrim
+    -f
+        Path to input folder or file (MANDATORY)
+        Default: 
+    -o
+        Name of output folder (MANDATORY)
+        Default: 
+    -r
+        Minimum read length
+        Default: 0
+    -R
+        Maximum read length
+        Default: 1000000
+    -q
+        Minimum quality
+        Default: 0
+    -j
+        Number of threads to use
+        Default: 1
+    -help
+        Print this help to stdout and exit with 0
+    -v
+        Print the current version
 ```
 
-## test nanodup
+
+Simple test command:
 ```bash
-$ ./nanodup -i tests/test.fastq -o test_nanodup
+./nanotrim -f tests/test.fastq -o TEST_NANOTRIM -r 100 -R 2000 -q 15 
 ```
-
-## nanomux
-Run `./nanomux` to get the help message.
-
-## nanotrim
-Run `./nanotrim` to get the help message.
 
 
 ## Credit
