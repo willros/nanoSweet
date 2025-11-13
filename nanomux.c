@@ -184,17 +184,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    FILE *LOG_FILE = open_summary_file(*out_folder, "nanomux.log");
-    FILE *S_FILE = open_summary_file(*out_folder, "nanomux_matches.csv");
-    
-    fprintf(S_FILE, "barcode,matches\n");
-    fprintf(LOG_FILE, "Nanomux\n\n");
-    fprintf(LOG_FILE, "Barcodes: %s\n", *barcode_file);
-    fprintf(LOG_FILE, "Fastq: %s\n", *fastq_file);
-    fprintf(LOG_FILE, "Barcode position: %zu\n", *barcode_pos);
-    fprintf(LOG_FILE, "k: %i\n", (int) *k);
-    fprintf(LOG_FILE, "Output folder: %s\n", *out_folder);
-    fprintf(LOG_FILE, "Trim option: %i\n", *trim);
     
     nob_log(NOB_INFO, "Parsing barcode file %s", *barcode_file);
     
@@ -295,10 +284,37 @@ int main(int argc, char **argv) {
         thpool_wait(thpool);
     }
     
-    // ----------------- LOG TO SUMMARY AND LOG FILE ---------------------------
+    
+    
+    // ----------------- LOG TO STDOUT, SUMMARY, MATCHES AND REMOVE EMPTY FILES---------------------------
+    FILE *LOG_FILE = open_summary_file(*out_folder, "nanomux.log");
+    FILE *S_FILE = open_summary_file(*out_folder, "nanomux_matches.csv");
+    
+    fprintf(LOG_FILE, "Nanomux\n\n");
+    fprintf(LOG_FILE, "Barcodes: %s\n", *barcode_file);
+    fprintf(LOG_FILE, "Fastq: %s\n", *fastq_file);
+    fprintf(LOG_FILE, "Barcode position: %zu\n", *barcode_pos);
+    fprintf(LOG_FILE, "k: %i\n", (int) *k);
+    fprintf(LOG_FILE, "Output folder: %s\n", *out_folder);
+    fprintf(LOG_FILE, "Trim option: %i\n", *trim);
     printf("INFO: Processed %zu reads\n", counter);
     printf("INFO: Reads shorter than p: %zu reads\n", reads_shorter_than_p);
-    for (size_t i = 0; i < barcodes.count; i++) printf("%s: %zu\n", barcodes.items[i].name, barcodes.items[i].counter);
+    fprintf(LOG_FILE, "Processed %zu reads\n", counter);
+    fprintf(LOG_FILE, "Reads shorter than p: %zu reads\n", reads_shorter_than_p);
+    
+    fprintf(S_FILE, "barcode,matches\n");
+    for (size_t i = 0; i < barcodes.count; i++) {
+        size_t bc_count = barcodes.items[i].counter;
+        char *bc_name = barcodes.items[i].name;
+        fprintf(S_FILE, "%s,%zu\n", bc_name, bc_count);
+        printf("%s: %zu\n", bc_name, bc_count);
+        // remove file if empty
+        if (bc_count == 0) {
+            printf("deleting empty file:\n");
+            char *bc_file = barcodes.items[i].out_name;
+            nob_delete_file(bc_file);
+        }
+    }
     
     // ----------------- CLEAN-UP ---------------------------
     thpool_destroy(thpool);
@@ -309,6 +325,7 @@ int main(int argc, char **argv) {
     fclose(S_FILE);
     fclose(LOG_FILE);
     gzclose(fp);
+    
 
     printf("\n");
     nob_log(NOB_INFO, "nanomux done!\n");
