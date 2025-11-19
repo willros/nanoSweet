@@ -225,7 +225,14 @@ int main(int argc, char **argv) {
     size_t counter = 0;
     size_t reads_shorter_than_p = 0;
 
+#define REPORT_INTERVAL (1000 * 10)
+
     while ((l = kseq_read(seq)) >= 0) { 
+        counter++;
+        if (counter % REPORT_INTERVAL == 0) {
+            fprintf(stderr, "\rProcessed: %zu reads", counter);
+            fflush(stderr);
+        }
         if (seq->seq.l <= *barcode_pos) {
             reads_shorter_than_p++;
             continue;
@@ -262,7 +269,6 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < reads.count; i++) free_read(reads.items[i]);
             reads.count = 0;
         }
-        counter++;
     }
 
     // PROCESS LEFT OVER READS IN BUFFER
@@ -285,7 +291,6 @@ int main(int argc, char **argv) {
     }
     
     
-    
     // ----------------- LOG TO STDOUT, SUMMARY, MATCHES AND REMOVE EMPTY FILES---------------------------
     FILE *LOG_FILE = open_summary_file(*out_folder, "nanomux.log");
     FILE *S_FILE = open_summary_file(*out_folder, "nanomux_matches.csv");
@@ -297,7 +302,7 @@ int main(int argc, char **argv) {
     fprintf(LOG_FILE, "k: %i\n", (int) *k);
     fprintf(LOG_FILE, "Output folder: %s\n", *out_folder);
     fprintf(LOG_FILE, "Trim option: %i\n", *trim);
-    printf("INFO: Processed %zu reads\n", counter);
+    printf("\nINFO: Processed %zu reads\n", counter);
     printf("INFO: Reads shorter than p: %zu reads\n", reads_shorter_than_p);
     fprintf(LOG_FILE, "Processed %zu reads\n", counter);
     fprintf(LOG_FILE, "Reads shorter than p: %zu reads\n", reads_shorter_than_p);
