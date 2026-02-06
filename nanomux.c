@@ -171,6 +171,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+	if (*k >= 4 || k < 0) {
+		nob_log(NOB_ERROR, "k cannot be larger than 3 or less than 0");
+		return 1;
+	}
+
     nob_log(NOB_INFO, "Running nanomux");
     nob_log(NOB_INFO, "Barcode position: 0 -> %zu", *barcode_pos);
     nob_log(NOB_INFO, "k: %zu", *k);
@@ -315,7 +320,6 @@ int main(int argc, char **argv) {
         printf("%s: %zu\n", bc_name, bc_count);
         // remove file if empty
         if (bc_count == 0) {
-            printf("deleting empty file:\n");
             char *bc_file = barcodes.items[i].out_name;
             nob_delete_file(bc_file);
         }
@@ -331,7 +335,6 @@ int main(int argc, char **argv) {
     fclose(LOG_FILE);
     gzclose(fp);
     
-
     printf("\n");
     nob_log(NOB_INFO, "nanomux done!\n");
     
