@@ -62,6 +62,7 @@ void complement_sequence(char *src, char *dest, size_t length);
 bool parse_barcodes(const char *bc_path, Barcodes *barcodes, Nob_String_Builder *sb, char *outdir);
 int parse_csv_headers(const char *barcode_path);
 void close_gz_files(Barcode *bc);
+void free_barcode(Barcode *bc);
 static inline int min(int a, int b, int c);
 int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k);
 FILE* open_summary_file(const char *out_folder, const char *filename);
@@ -128,15 +129,25 @@ bool parse_barcodes(const char *bc_path, Barcodes *barcodes, Nob_String_Builder 
                     barcode.fw_length = field_len;
                     barcode.fw = strdup(field_cstr);
                     barcode.fw_comp = malloc(field_len + 1);
-                    if (barcode.fw_comp == NULL) return false;
-                    complement_sequence(barcode.fw, barcode.fw_comp, barcode.fw_length); 
+                    if (barcode.fw_comp == NULL) {
+                        free(barcode.name);
+                        free(barcode.fw);
+                        return false;
+                    }
+                    complement_sequence(barcode.fw, barcode.fw_comp, barcode.fw_length);
                     break;
                 case 2:
                     barcode.rv_length = strlen(field_cstr);
                     barcode.rv = strdup(field_cstr);
                     barcode.rv_comp = malloc(field_len + 1);
-                    if (barcode.rv_comp == NULL) return false;
-                    complement_sequence(barcode.rv, barcode.rv_comp, barcode.rv_length); 
+                    if (barcode.rv_comp == NULL) {
+                        free(barcode.name);
+                        free(barcode.fw);
+                        free(barcode.fw_comp);
+                        free(barcode.rv);
+                        return false;
+                    }
+                    complement_sequence(barcode.rv, barcode.rv_comp, barcode.rv_length);
                     break;
                 default: 
                     printf("ERROR: your barcodes contains %zu fields. It should be 3.\n", i + 1);
@@ -161,6 +172,15 @@ void close_gz_files(Barcode *bc)
     if (bc->out_gz) gzclose(bc->out_gz);
 }
 
+void free_barcode(Barcode *bc)
+{
+    free(bc->name);
+    free(bc->fw);
+    free(bc->fw_comp);
+    free(bc->rv);
+    free(bc->rv_comp);
+}
+
 void print_barcode_documentation(void) 
 {
     printf("You can use either single barcodes, or dual barcodes\n\n");
@@ -177,7 +197,7 @@ void print_barcode_documentation(void)
 // https://stackoverflow.com/questions/8139958/algorithm-to-find-edit-distance-to-all-substrings
 int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k) 
 {
-    if (k < 0 || k > needle_len) return -1;  
+    if (k > needle_len) return -1;
     
     size_t dp[needle_len + 1][haystack_len + 1];
 
@@ -228,6 +248,7 @@ int parse_csv_headers(const char *barcode_path)
     
     while (fscanf(f, "%99[^,\n]", cols[count]) == 1) {
         count++;
+        if (count >= 10) break;
         c = fgetc(f);
         if (c == '\n' || c == EOF) break;
     }

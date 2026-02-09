@@ -78,6 +78,7 @@ void process_barcode(void *arg)
                 if (match_last_rv != -1) {
                     b->counter++;
                     int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
+                    if (slice_end <= 0) continue;
                     if (trim) {
                         if (!append_read_to_gzip_fastq(b->out_gz, read, 0, slice_end)) exit(1);
                     } else {
@@ -87,7 +88,7 @@ void process_barcode(void *arg)
             }
         }
     }
-            
+
     // Dual barcode processing
     if (barcode_schema == 2) {
         for (size_t i = 0; i < td->reads->count; i++) {
@@ -104,6 +105,7 @@ void process_barcode(void *arg)
                 if (match_last_fw != -1) {
                     b->counter++;
                     int slice_end = read->len - barcode_pos + match_last_fw - b->rv_length;
+                    if (slice_end <= 0) continue;
                     if (trim) {
                         if (!append_read_to_gzip_fastq(b->out_gz, read, match_first_fw, slice_end)) exit(1);
                     } else {
@@ -112,13 +114,14 @@ void process_barcode(void *arg)
                 }
             } else {
                 // rv ------ revcomp(fw)
-                int match_first_rv = levenshtein_distance(first_read_slice, barcode_pos, b->rv, b->rv_length, k); 
+                int match_first_rv = levenshtein_distance(first_read_slice, barcode_pos, b->rv, b->rv_length, k);
                 if (match_first_rv != -1) {
                     // revcomp(fw)
                     int match_last_rv = levenshtein_distance(last_read_slice, barcode_pos, b->fw_comp, b->fw_length, k);
                     if (match_last_rv != -1) {
                         b->counter++;
                         int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
+                        if (slice_end <= 0) continue;
                         if (trim) {
                             if (!append_read_to_gzip_fastq(b->out_gz, read, match_first_rv, slice_end)) exit(1);
                         } else {
@@ -171,8 +174,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-	if (*k >= 4 || k < 0) {
-		nob_log(NOB_ERROR, "k cannot be larger than 3 or less than 0");
+	if (*k >= 4) {
+		nob_log(NOB_ERROR, "k cannot be larger than 3");
 		return 1;
 	}
 
@@ -328,7 +331,10 @@ int main(int argc, char **argv) {
     // ----------------- CLEAN-UP ---------------------------
     thpool_destroy(thpool);
     for (size_t i = 0; i < reads.count; i++) free_read(reads.items[i]);
-    for (size_t i = 0; i < barcodes.count; i++) gzclose(barcodes.items[i].out_gz);
+    for (size_t i = 0; i < barcodes.count; i++) {
+        gzclose(barcodes.items[i].out_gz);
+        free_barcode(&barcodes.items[i]);
+    }
     nob_da_free(barcodes);
     nob_da_free(reads);
     fclose(S_FILE);
