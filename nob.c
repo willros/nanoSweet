@@ -26,5 +26,12 @@ int main(int argc, char **argv)
     cmd_append(&cmd, "nanomux.c", "thpool.c");
     cmd_append(&cmd, "-lz", "-lpthread", "-lm", "-O3");
     if (!cmd_run(&cmd)) return 1;
+
+    cmd_append(&cmd, "cc");
+    cmd_append(&cmd, "-o", "tests/test_unit");
+    cmd_append(&cmd, "tests/test_unit.c");
+    cmd_append(&cmd, "-lz", "-lm");
+    if (!cmd_run(&cmd)) return 1;
+
     return 0;
 }
