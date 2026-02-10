@@ -35,104 +35,142 @@
 KSEQ_INIT(gzFile, gzread)
 
 typedef struct {
-    Barcode *barcode;
+    Barcodes *barcodes;
     Reads *reads;
+    size_t start;
+    size_t end;
     size_t barcode_pos;
     size_t k;
     bool trim;
     int barcode_schema;
+    pthread_mutex_t *bc_mutexes;
 } Thread_Data;
 
-void process_barcode(void *arg) 
+void process_reads(void *arg)
 {
     Thread_Data *td = (Thread_Data *)arg;
-    Barcode *b = td->barcode;
     size_t k = td->k;
     size_t barcode_pos = td->barcode_pos;
     bool trim = td->trim;
     int barcode_schema = td->barcode_schema;
 
-    // Single barcode processing
-    if (!(barcode_schema == 1 || barcode_schema == 2)) {
-        printf("ERROR: wrong barcode schema\n");
-        exit(1);
-    } 
-    if (barcode_schema == 1) {
-        for (size_t i = 0; i < td->reads->count; i++) {
-            Read *read = &td->reads->items[i];
-            const char *first_read_slice = read->first_slice;
-            const char *last_read_slice = read->last_slice;
-            
-            // Check for barcode in 5' end
-            int match_first_fw = levenshtein_distance(first_read_slice, barcode_pos, b->fw, b->fw_length, k);
-            if (match_first_fw != -1) {
-                b->counter++;
-                if (trim) {
-                    if (!append_read_to_gzip_fastq(b->out_gz, read, match_first_fw, read->len)) exit(1);
-                } else {
-                    if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
-                }
-            } else {
-                // Check for barcode in 3' end
-                int match_last_rv = levenshtein_distance(last_read_slice, barcode_pos, b->fw_comp, b->fw_length, k);
-                if (match_last_rv != -1) {
-                    b->counter++;
-                    int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
-                    if (slice_end <= 0) continue;
-                    if (trim) {
-                        if (!append_read_to_gzip_fastq(b->out_gz, read, 0, slice_end)) exit(1);
-                    } else {
-                        if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
-                    }
-                }
-            }
-        }
-    }
+    for (size_t r = td->start; r < td->end; r++) {
+        Read *read = &td->reads->items[r];
+        const char *first_slice = read->first_slice;
+        const char *last_slice = read->last_slice;
 
-    // Dual barcode processing
-    if (barcode_schema == 2) {
-        for (size_t i = 0; i < td->reads->count; i++) {
-            Read *read = &td->reads->items[i];
-            const char *first_read_slice = read->first_slice;
-            const char *last_read_slice = read->last_slice;
-            
-            // fw ------ revcomp(rv)
-            int match_first_fw = levenshtein_distance(first_read_slice, barcode_pos, b->fw, b->fw_length, k); 
-            //printf("DEBUG levenshtein: haystack='%s' (len %zu), needle='%s' (len %zu), k=%zu, result=%d\n", first_read_slice, barcode_pos, b->fw, b->fw_length, k, match_first_fw);
-            if (match_first_fw != -1) {
-                // revcomp(rv)
-                int match_last_fw = levenshtein_distance(last_read_slice, barcode_pos, b->rv_comp, b->rv_length, k);
-                if (match_last_fw != -1) {
+        for (size_t bi = 0; bi < td->barcodes->count; bi++) {
+            Barcode *b = &td->barcodes->items[bi];
+            bool matched = false;
+
+            if (barcode_schema == 1) {
+                // Check for barcode in 5' end
+                int m5 = levenshtein_distance(first_slice, barcode_pos, b->fw, b->fw_length, k);
+                if (m5 != -1) {
+                    pthread_mutex_lock(&td->bc_mutexes[bi]);
                     b->counter++;
-                    int slice_end = read->len - barcode_pos + match_last_fw - b->rv_length;
-                    if (slice_end <= 0) continue;
                     if (trim) {
-                        if (!append_read_to_gzip_fastq(b->out_gz, read, match_first_fw, slice_end)) exit(1);
+                        if (!append_read_to_gzip_fastq(b->out_gz, read, m5, read->len)) exit(1);
                     } else {
                         if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
                     }
+                    pthread_mutex_unlock(&td->bc_mutexes[bi]);
+                    matched = true;
+                } else {
+                    // Check for barcode in 3' end
+                    int m3 = levenshtein_distance(last_slice, barcode_pos, b->fw_comp, b->fw_length, k);
+                    if (m3 != -1) {
+                        int slice_end = read->len - barcode_pos + m3 - b->fw_length;
+                        if (slice_end > 0) {
+                            pthread_mutex_lock(&td->bc_mutexes[bi]);
+                            b->counter++;
+                            if (trim) {
+                                if (!append_read_to_gzip_fastq(b->out_gz, read, 0, slice_end)) exit(1);
+                            } else {
+                                if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
+                            }
+                            pthread_mutex_unlock(&td->bc_mutexes[bi]);
+                            matched = true;
+                        }
+                    }
                 }
-            } else {
-                // rv ------ revcomp(fw)
-                int match_first_rv = levenshtein_distance(first_read_slice, barcode_pos, b->rv, b->rv_length, k);
-                if (match_first_rv != -1) {
-                    // revcomp(fw)
-                    int match_last_rv = levenshtein_distance(last_read_slice, barcode_pos, b->fw_comp, b->fw_length, k);
-                    if (match_last_rv != -1) {
-                        b->counter++;
-                        int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
-                        if (slice_end <= 0) continue;
-                        if (trim) {
-                            if (!append_read_to_gzip_fastq(b->out_gz, read, match_first_rv, slice_end)) exit(1);
-                        } else {
-                            if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
+            } else if (barcode_schema == 2) {
+                // fw ------ revcomp(rv)
+                int m5fw = levenshtein_distance(first_slice, barcode_pos, b->fw, b->fw_length, k);
+                if (m5fw != -1) {
+                    int m3rv = levenshtein_distance(last_slice, barcode_pos, b->rv_comp, b->rv_length, k);
+                    if (m3rv != -1) {
+                        int slice_end = read->len - barcode_pos + m3rv - b->rv_length;
+                        if (slice_end > 0) {
+                            pthread_mutex_lock(&td->bc_mutexes[bi]);
+                            b->counter++;
+                            if (trim) {
+                                if (!append_read_to_gzip_fastq(b->out_gz, read, m5fw, slice_end)) exit(1);
+                            } else {
+                                if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
+                            }
+                            pthread_mutex_unlock(&td->bc_mutexes[bi]);
+                            matched = true;
+                        }
+                    }
+                }
+                if (!matched) {
+                    // rv ------ revcomp(fw)
+                    int m5rv = levenshtein_distance(first_slice, barcode_pos, b->rv, b->rv_length, k);
+                    if (m5rv != -1) {
+                        int m3fw = levenshtein_distance(last_slice, barcode_pos, b->fw_comp, b->fw_length, k);
+                        if (m3fw != -1) {
+                            int slice_end = read->len - barcode_pos + m3fw - b->fw_length;
+                            if (slice_end > 0) {
+                                pthread_mutex_lock(&td->bc_mutexes[bi]);
+                                b->counter++;
+                                if (trim) {
+                                    if (!append_read_to_gzip_fastq(b->out_gz, read, m5rv, slice_end)) exit(1);
+                                } else {
+                                    if (!append_read_to_gzip_fastq(b->out_gz, read, 0, read->len)) exit(1);
+                                }
+                                pthread_mutex_unlock(&td->bc_mutexes[bi]);
+                                matched = true;
+                            }
                         }
                     }
                 }
             }
+            if (matched) break;
         }
     }
     free(td);
+}
+
+void dispatch_reads(threadpool thpool, Barcodes *barcodes, Reads *reads,
+                    size_t num_threads, size_t barcode_pos, size_t k,
+                    bool trim, int barcode_schema, pthread_mutex_t *bc_mutexes)
+{
+    if (reads->count == 0) return;
+    size_t chunk_size = (reads->count + num_threads - 1) / num_threads;
+    for (size_t t = 0; t < num_threads; t++) {
+        size_t start = t * chunk_size;
+        if (start >= reads->count) break;
+        size_t end = start + chunk_size;
+        if (end > reads->count) end = reads->count;
+
+        Thread_Data *td = malloc(sizeof(Thread_Data));
+        if (!td) {
+            nob_log(NOB_ERROR, "Failed to allocate thread data");
+            exit(1);
+        }
+        td->barcodes = barcodes;
+        td->reads = reads;
+        td->start = start;
+        td->end = end;
+        td->barcode_pos = barcode_pos;
+        td->k = k;
+        td->trim = trim;
+        td->barcode_schema = barcode_schema;
+        td->bc_mutexes = bc_mutexes;
+        thpool_add_work(thpool, process_reads, (void *)td);
+    }
+    thpool_wait(thpool);
 }
 
 int main(int argc, char **argv) {    
@@ -223,6 +261,15 @@ int main(int argc, char **argv) {
         printf("ERROR: Could not init threads\n");
         return 1;
     }
+
+    pthread_mutex_t *bc_mutexes = malloc(barcodes.count * sizeof(pthread_mutex_t));
+    if (!bc_mutexes) {
+        nob_log(NOB_ERROR, "Failed to allocate mutexes");
+        return 1;
+    }
+    for (size_t i = 0; i < barcodes.count; i++) {
+        pthread_mutex_init(&bc_mutexes[i], NULL);
+    }
     
     // ----------------- GO THROUGH READS ---------------------------
     gzFile fp = gzopen(*fastq_file, "r"); 
@@ -257,22 +304,9 @@ int main(int argc, char **argv) {
         
         // ----------------- TRIGGER THREADS AND PROCESSING ---------------------------
         if (reads.count >= READ_BUFFER) {
-            for (size_t i = 0; i < barcodes.count; i++) {
-                Thread_Data *td = malloc(sizeof(Thread_Data));
-                if (!td) {
-                    nob_log(NOB_ERROR, "Failed to allocate thread data");
-                    return 1;
-                }
-                td->barcode = &barcodes.items[i];
-                td->reads = &reads;
-                td->barcode_pos = *barcode_pos;
-                td->k = *k;
-                td->trim = *trim;
-                td->barcode_schema = barcode_schema;
-                thpool_add_work(thpool, process_barcode, (void *)td);
-            }
-            thpool_wait(thpool);
-            
+            dispatch_reads(thpool, &barcodes, &reads, *num_threads,
+                           *barcode_pos, *k, *trim, barcode_schema, bc_mutexes);
+
             // Clean up reads
             for (size_t i = 0; i < reads.count; i++) free_read(reads.items[i]);
             reads.count = 0;
@@ -281,21 +315,8 @@ int main(int argc, char **argv) {
 
     // PROCESS LEFT OVER READS IN BUFFER
     if (reads.count > 0) {
-        for (size_t i = 0; i < barcodes.count; i++) {
-            Thread_Data *td = malloc(sizeof(Thread_Data));
-            if (!td) {
-                nob_log(NOB_ERROR, "Failed to allocate thread data");
-                return 1;
-            }
-            td->barcode = &barcodes.items[i];
-            td->reads = &reads;
-            td->barcode_pos = *barcode_pos;
-            td->k = *k;
-            td->trim = *trim;
-            td->barcode_schema = barcode_schema;
-            thpool_add_work(thpool, process_barcode, (void *)td);
-        }
-        thpool_wait(thpool);
+        dispatch_reads(thpool, &barcodes, &reads, *num_threads,
+                       *barcode_pos, *k, *trim, barcode_schema, bc_mutexes);
     }
     
     
@@ -330,6 +351,10 @@ int main(int argc, char **argv) {
     
     // ----------------- CLEAN-UP ---------------------------
     thpool_destroy(thpool);
+    for (size_t i = 0; i < barcodes.count; i++) {
+        pthread_mutex_destroy(&bc_mutexes[i]);
+    }
+    free(bc_mutexes);
     for (size_t i = 0; i < reads.count; i++) free_read(reads.items[i]);
     for (size_t i = 0; i < barcodes.count; i++) {
         gzclose(barcodes.items[i].out_gz);

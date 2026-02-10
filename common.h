@@ -195,10 +195,22 @@ void print_barcode_documentation(void)
 }
 
 // https://stackoverflow.com/questions/8139958/algorithm-to-find-edit-distance-to-all-substrings
-int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k) 
+int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k)
 {
     if (k > needle_len) return -1;
-    
+    if (needle_len > haystack_len) return -1;
+
+    // Fast path: exact substring match (k=0)
+    if (k == 0) {
+        for (size_t j = 0; j <= haystack_len - needle_len; j++) {
+            if (memcmp(haystack + j, needle, needle_len) == 0) {
+                return (int)(j + needle_len);
+            }
+        }
+        return -1;
+    }
+
+    // Semi-global alignment (row-major for cache locality)
     size_t dp[needle_len + 1][haystack_len + 1];
 
     for (size_t j = 0; j <= haystack_len; j++) {
@@ -213,11 +225,9 @@ int levenshtein_distance(const char *haystack, size_t haystack_len, const char *
             } else {
                 dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
             }
+            // Early return on last row
+            if (i == needle_len && j >= needle_len && dp[i][j] <= k) return (int)j;
         }
-    }
-
-    for (size_t j = needle_len; j <= haystack_len; j++) {
-        if (dp[needle_len][j] <= k) return (int)j;
     }
     return -1;
 }

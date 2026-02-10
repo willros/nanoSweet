@@ -98,14 +98,14 @@ void test_levenshtein_distance(void) {
 void test_parse_csv_headers(void) {
     TEST("parse_csv_headers");
 
-    int result = parse_csv_headers("tests/test_barcodes_single.csv");
+    int result = parse_csv_headers("./test_barcodes_single.csv");
     ASSERT(result == 1, "single barcode CSV returns 1");
 
-    result = parse_csv_headers("tests/test_barcodes_dual.csv");
+    result = parse_csv_headers("./test_barcodes_dual.csv");
     ASSERT(result == 2, "dual barcode CSV returns 2");
 
     // Non-existent file
-    result = parse_csv_headers("tests/nonexistent.csv");
+    result = parse_csv_headers("./nonexistent.csv");
     ASSERT(result == -1, "non-existent file returns -1");
 }
 
