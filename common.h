@@ -9,6 +9,7 @@
 #include <zlib.h>
 #include <pthread.h>
 #include <math.h>
+#include <errno.h>
 
 
 // ----------------------------------------------------------------------------
@@ -27,8 +28,6 @@ typedef struct {
     size_t rv_length;
 
     char out_name[512];
-    gzFile out_gz;
-
     size_t counter;
 } Barcode;
 
@@ -61,7 +60,6 @@ char complement(const char nucleotide);
 void complement_sequence(char *src, char *dest, size_t length);
 bool parse_barcodes(const char *bc_path, Barcodes *barcodes, Nob_String_Builder *sb, char *outdir);
 int parse_csv_headers(const char *barcode_path);
-void close_gz_files(Barcode *bc);
 void free_barcode(Barcode *bc);
 static inline int min(int a, int b, int c);
 int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k);
@@ -155,22 +153,14 @@ bool parse_barcodes(const char *bc_path, Barcodes *barcodes, Nob_String_Builder 
                     return false;
             }
         }
-        // add the new gz file to write to later.
+        // Store the output path. The file is opened lazily while processing so
+        // the number of open descriptors does not grow with the barcode count.
         snprintf(barcode.out_name, sizeof(barcode.out_name), "%s/%s.fq.gz", outdir, barcode.name);
-        barcode.out_gz = gzopen(barcode.out_name, "ab");
-        if (!barcode.out_gz) {
-            printf("ERROR: Could not open %s to write to\n", barcode.out_name);
-            return false;
-        }
         nob_da_append(barcodes, barcode);
     }
     return true;
 }
 
-void close_gz_files(Barcode *bc)
-{
-    if (bc->out_gz) gzclose(bc->out_gz);
-}
 
 void free_barcode(Barcode *bc)
 {
@@ -295,7 +285,7 @@ FILE* open_summary_file(const char *out_folder, const char *filename)
     
     FILE *S_FILE = fopen(summary_file, "ab");
     if (S_FILE == NULL) {
-        nob_log(NOB_ERROR, "Could NOT create summary file");
+        nob_log(NOB_ERROR, "Could NOT create summary file %s: %s", summary_file, strerror(errno));
         return NULL;
     }
     

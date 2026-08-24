@@ -3,9 +3,9 @@ set -euo pipefail
 
 PASS=0
 FAIL=0
-NANOMUX=./nanomux
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+NANOMUX=${NANOMUX:-./nanomux}
+TEST_TMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEST_TMP_DIR"' EXIT
 
 # ---------- helpers ----------
 
@@ -70,7 +70,7 @@ get_match_count() {
 
 # ---------- Test 1: Single barcode, k=0, no trim ----------
 echo "TEST 1: Single barcode, k=0, no trim"
-OUT="$TMPDIR/test1"
+OUT="$TEST_TMP_DIR/test1"
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 >/dev/null 2>&1
 
 assert_eq "BC_A match count" "4" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
@@ -86,7 +86,7 @@ assert_read_not_in_output "read_nomatch not in BC_B" "read_nomatch" "$OUT/BC_B.f
 
 # ---------- Test 2: Single barcode, k=1 ----------
 echo "TEST 2: Single barcode, k=1"
-OUT="$TMPDIR/test2"
+OUT="$TEST_TMP_DIR/test2"
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 1 -j 1 >/dev/null 2>&1
 
 assert_eq "BC_A match count with k=1" "5" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
@@ -94,7 +94,7 @@ assert_read_in_output "read_a_fw_k1 in BC_A with k=1" "read_a_fw_k1" "$OUT/BC_A.
 
 # ---------- Test 3: Single barcode, k=0, with trim ----------
 echo "TEST 3: Single barcode, k=0, with trim"
-OUT="$TMPDIR/test3"
+OUT="$TEST_TMP_DIR/test3"
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 -t >/dev/null 2>&1
 
 # Trimmed reads should be shorter than 200
@@ -107,7 +107,7 @@ assert_eq "trimmed read_a_3prime length" "160" "$trimmed_3prime"
 
 # ---------- Test 4: Dual barcode, k=0 ----------
 echo "TEST 4: Dual barcode, k=0"
-OUT="$TMPDIR/test4"
+OUT="$TEST_TMP_DIR/test4"
 $NANOMUX -b tests/test_barcodes_dual.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 >/dev/null 2>&1
 
 assert_eq "BC_A dual match count" "2" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
@@ -120,8 +120,8 @@ assert_read_not_in_output "read_a_fw_k0 not in dual BC_A" "read_a_fw_k0" "$OUT/B
 
 # ---------- Test 5: Multi-thread determinism (j=1 vs j=4) ----------
 echo "TEST 5: Multi-thread determinism"
-OUT1="$TMPDIR/test5_j1"
-OUT4="$TMPDIR/test5_j4"
+OUT1="$TEST_TMP_DIR/test5_j1"
+OUT4="$TEST_TMP_DIR/test5_j4"
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT1" -p 50 -k 0 -j 1 >/dev/null 2>&1
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT4" -p 50 -k 0 -j 4 >/dev/null 2>&1
 
@@ -131,7 +131,7 @@ assert_eq "j=1 vs j=4 matches.csv identical" "$matches_j1" "$matches_j4"
 
 # ---------- Test 6: Empty input ----------
 echo "TEST 6: Empty input"
-OUT="$TMPDIR/test6"
+OUT="$TEST_TMP_DIR/test6"
 $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_empty.fastq -o "$OUT" -p 50 -k 0 -j 1 >/dev/null 2>&1
 
 assert_eq "BC_A empty input" "0" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
@@ -141,14 +141,14 @@ assert_file_not_exists "BC_B.fq.gz deleted when empty" "$OUT/BC_B.fq.gz"
 
 # ---------- Test 7: Short reads reported correctly ----------
 echo "TEST 7: Short reads count"
-OUT="$TMPDIR/test7"
-$NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 2>&1 | grep -o "Reads shorter than p: [0-9]* reads" > "$TMPDIR/short_msg.txt"
-short_count=$(cat "$TMPDIR/short_msg.txt" | grep -o '[0-9]*' | head -1)
+OUT="$TEST_TMP_DIR/test7"
+$NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 2>&1 | grep -o "Reads shorter than p: [0-9]* reads" > "$TEST_TMP_DIR/short_msg.txt"
+short_count=$(cat "$TEST_TMP_DIR/short_msg.txt" | grep -o '[0-9]*' | head -1)
 assert_eq "reads shorter than p" "1" "$short_count"
 
 # ---------- Test 8: Invalid k=4 ----------
 echo "TEST 8: Invalid k=4 rejected"
-OUT="$TMPDIR/test8"
+OUT="$TEST_TMP_DIR/test8"
 if $NANOMUX -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 4 -j 1 >/dev/null 2>&1; then
     FAIL=$((FAIL + 1))
     echo "  FAIL: k=4 should return non-zero exit code"
@@ -158,9 +158,90 @@ fi
 
 # ---------- Test 9: Reverse orientation in dual mode ----------
 echo "TEST 9: Reverse orientation in dual mode"
-OUT="$TMPDIR/test9"
+OUT="$TEST_TMP_DIR/test9"
 $NANOMUX -b tests/test_barcodes_dual.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1 >/dev/null 2>&1
 assert_read_in_output "read_a_dual_rev matched in dual (rv...fw_comp)" "read_a_dual_rev" "$OUT/BC_A.fq.gz"
+
+# ---------- Test 10: Output remains readable across multiple read buffers ----------
+echo "TEST 10: Multi-buffer gzip output"
+MULTI_BARCODES="$TEST_TMP_DIR/multi_buffer_barcodes.csv"
+MULTI_FASTQ="$TEST_TMP_DIR/multi_buffer.fastq"
+printf 'name,forward\nBC_MULTI,ACGT\n' > "$MULTI_BARCODES"
+: > "$MULTI_FASTQ"
+for i in $(seq 1 10005); do
+    printf '@multi_%s\nACGTAAAAAAAAAAAAAAAA\n+\nIIIIIIIIIIIIIIIIIIII\n' "$i" >> "$MULTI_FASTQ"
+done
+
+OUT="$TEST_TMP_DIR/test10"
+$NANOMUX -b "$MULTI_BARCODES" -f "$MULTI_FASTQ" -o "$OUT" -p 12 -k 0 -j 2 >/dev/null 2>&1
+assert_eq "multi-buffer match count" "10005" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_MULTI")"
+assert_eq "multi-buffer output read count" "10005" "$(count_reads "$OUT/BC_MULTI.fq.gz")"
+if gzip -t "$OUT/BC_MULTI.fq.gz"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: multi-buffer output is not a valid gzip stream"
+fi
+
+# ---------- Test 11: Many matching barcodes under a low descriptor limit ----------
+echo "TEST 11: Low descriptor limit with many barcodes"
+MANY_BARCODES="$TEST_TMP_DIR/many_barcodes.csv"
+ONE_READ="$TEST_TMP_DIR/one_read.fastq"
+printf 'name,forward\n' > "$MANY_BARCODES"
+for i in $(seq 1 300); do
+    printf 'BC_%03d,ACGT\n' "$i" >> "$MANY_BARCODES"
+done
+printf '@fd_read\nACGTAAAAAAAAAAAAAAAA\n+\nIIIIIIIIIIIIIIIIIIII\n' > "$ONE_READ"
+
+OUT="$TEST_TMP_DIR/test11"
+if (ulimit -n 32; "$NANOMUX" -b "$MANY_BARCODES" -f "$ONE_READ" -o "$OUT" -p 12 -k 0 -j 64) >"$TEST_TMP_DIR/test11.stdout" 2>"$TEST_TMP_DIR/test11.stderr"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: nanomux should succeed with 300 barcodes under ulimit -n 32"
+    sed -n '1,20p' "$TEST_TMP_DIR/test11.stderr"
+fi
+if grep -q 'Concurrent gzip outputs limited to 16' "$TEST_TMP_DIR/test11.stderr" &&
+   grep -q 'threads: 64' "$TEST_TMP_DIR/test11.stderr"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: output handles were not capped while preserving all 64 workers"
+fi
+many_summary_rows=$(tail -n +2 "$OUT/nanomux_matches.csv" | wc -l | tr -d '[:space:]')
+many_output_files=$(find "$OUT" -name 'BC_*.fq.gz' -type f | wc -l | tr -d '[:space:]')
+assert_eq "all low-limit barcodes summarized" "300" "$many_summary_rows"
+assert_eq "all low-limit barcode outputs created" "300" "$many_output_files"
+assert_eq "low-limit output remains readable" "1" "$(count_reads "$OUT/BC_001.fq.gz")"
+
+# ---------- Test 12: Summary open failure exits cleanly and flushes outputs ----------
+echo "TEST 12: Summary open failure cleanup"
+OUT="$TEST_TMP_DIR/test12"
+if (ulimit -n 5; "$NANOMUX" -b tests/test_barcodes_single.csv -f tests/test_known.fastq -o "$OUT" -p 50 -k 0 -j 1) >"$TEST_TMP_DIR/test12.stdout" 2>"$TEST_TMP_DIR/test12.stderr"; then
+    summary_failure_status=0
+else
+    summary_failure_status=$?
+fi
+assert_eq "summary open failure returns a normal error" "1" "$summary_failure_status"
+assert_eq "output is flushed before summary failure exit" "4" "$(count_reads "$OUT/BC_A.fq.gz")"
+if gzip -t "$OUT/BC_A.fq.gz"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: output gzip is invalid after summary open failure"
+fi
+if grep -q 'Could NOT create summary file.*Too many open files' "$TEST_TMP_DIR/test12.stderr"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: summary open failure did not report its path and system error"
+fi
+if grep -q 'Segmentation fault' "$TEST_TMP_DIR/test12.stderr"; then
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: summary open failure caused a segmentation fault"
+else
+    PASS=$((PASS + 1))
+fi
 
 # ---------- Summary ----------
 echo ""
