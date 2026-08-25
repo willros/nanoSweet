@@ -99,6 +99,12 @@ Simple test command:
 ```
 
 
+## How to cite
+
+If you use `nanoSweet` or any of its tools in your research, please cite:
+
+> Rosenbaum W, Rubio Garcia M, Löfgren-Burström A, Larsson P, Edin S, Bronnec V, Palmqvist R. Full-length 16S rRNA nanopore sequencing enables species resolution of *Fusobacterium* associated with colorectal cancer. *Gut Microbes*. 2026;18(1):2656004. https://doi.org/10.1080/19490976.2026.2656004
+
 ## Credit
 `nanoSweet` uses `kseq.h` for fastq parsing, and `nob.h`, written by [@tsoding](https://www.github.com/tsoding), for overall useful functions!  
 It also uses `thpool.h` by Johan Hanssen Seferidis.
