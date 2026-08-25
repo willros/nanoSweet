@@ -37,6 +37,19 @@
 KSEQ_INIT(gzFile, gzread)
 
 typedef struct {
+    size_t read_index;
+    size_t score;
+    int start;
+    int end;
+} Candidate_Match;
+
+typedef struct {
+    Candidate_Match *items;
+    size_t count;
+    size_t capacity;
+} Candidate_Matches;
+
+typedef struct {
     Read *read;
     int start;
     int end;
@@ -58,20 +71,51 @@ typedef struct {
 typedef struct {
     Barcode *barcode;
     Reads *reads;
+    Candidate_Matches *candidates;
     size_t barcode_pos;
     size_t k;
     bool trim;
     int barcode_schema;
     pthread_mutex_t *error_mutex;
     bool *worker_failed;
-    Output_Gate *output_gate;
-} Thread_Data;
+} Match_Thread_Data;
 
-static void mark_worker_failed(Thread_Data *td)
+typedef struct {
+    Barcode *barcode;
+    Pending_Writes *writes;
+    pthread_mutex_t *error_mutex;
+    bool *worker_failed;
+    Output_Gate *output_gate;
+} Write_Thread_Data;
+
+typedef struct {
+    bool found;
+    bool tied;
+    size_t barcode_index;
+    size_t score;
+    int start;
+    int end;
+} Read_Assignment;
+
+typedef struct {
+    size_t assigned;
+    size_t ambiguous;
+    size_t unclassified;
+} Assignment_Stats;
+
+static void mark_worker_failed(pthread_mutex_t *error_mutex, bool *worker_failed)
 {
-    pthread_mutex_lock(td->error_mutex);
-    *td->worker_failed = true;
-    pthread_mutex_unlock(td->error_mutex);
+    pthread_mutex_lock(error_mutex);
+    *worker_failed = true;
+    pthread_mutex_unlock(error_mutex);
+}
+
+static bool has_worker_failed(pthread_mutex_t *error_mutex, bool *worker_failed)
+{
+    pthread_mutex_lock(error_mutex);
+    bool failed = *worker_failed;
+    pthread_mutex_unlock(error_mutex);
+    return failed;
 }
 
 static bool output_gate_init(Output_Gate *gate, size_t limit)
@@ -123,6 +167,18 @@ static void output_gate_release(Output_Gate *gate)
     pthread_mutex_unlock(&gate->mutex);
 }
 
+static void queue_candidate(Candidate_Matches *matches, size_t read_index,
+                            size_t score, int start, int end)
+{
+    Candidate_Match match = {
+        .read_index = read_index,
+        .score = score,
+        .start = start,
+        .end = end,
+    };
+    nob_da_append(matches, match);
+}
+
 static void queue_barcode_read(Pending_Writes *writes, Read *read, int start, int end)
 {
     Pending_Write pending = {
@@ -147,9 +203,9 @@ static size_t safe_output_handle_count(size_t requested_threads)
     return requested_threads;
 }
 
-static bool write_pending_reads(Thread_Data *td, Pending_Writes *writes)
+static bool write_pending_reads(Write_Thread_Data *td)
 {
-    if (writes->count == 0) return true;
+    if (td->writes->count == 0) return true;
 
     bool success = true;
     gzFile output = NULL;
@@ -167,8 +223,8 @@ static bool write_pending_reads(Thread_Data *td, Pending_Writes *writes)
         goto cleanup;
     }
 
-    for (size_t i = 0; i < writes->count; i++) {
-        Pending_Write *pending = &writes->items[i];
+    for (size_t i = 0; i < td->writes->count; i++) {
+        Pending_Write *pending = &td->writes->items[i];
         if (!append_read_to_gzip_fastq(output, pending->read, pending->start, pending->end)) {
             success = false;
             break;
@@ -187,136 +243,216 @@ cleanup:
     return success;
 }
 
-void process_barcode(void *arg) 
+static void process_pending_writes(void *arg)
 {
-    Thread_Data *td = (Thread_Data *)arg;
-    Barcode *b = td->barcode;
-    size_t k = td->k;
-    size_t barcode_pos = td->barcode_pos;
-    bool trim = td->trim;
-    int barcode_schema = td->barcode_schema;
-    bool success = true;
-    Pending_Writes pending_writes = {0};
-
-    // Single barcode processing
-    if (!(barcode_schema == 1 || barcode_schema == 2)) {
-        nob_log(NOB_ERROR, "Wrong barcode schema");
-        success = false;
-        goto cleanup;
-    } 
-    if (barcode_schema == 1) {
-        for (size_t i = 0; i < td->reads->count; i++) {
-            Read *read = &td->reads->items[i];
-            const char *first_read_slice = read->first_slice;
-            const char *last_read_slice = read->last_slice;
-            
-            // Check for barcode in 5' end
-            int match_first_fw = levenshtein_distance(first_read_slice, barcode_pos, b->fw, b->fw_length, k);
-            if (match_first_fw != -1) {
-                b->counter++;
-                if (trim) {
-                    queue_barcode_read(&pending_writes, read, match_first_fw, read->len);
-                } else {
-                    queue_barcode_read(&pending_writes, read, 0, read->len);
-                }
-            } else {
-                // Check for barcode in 3' end
-                int match_last_rv = levenshtein_distance(last_read_slice, barcode_pos, b->fw_comp, b->fw_length, k);
-                if (match_last_rv != -1) {
-                    b->counter++;
-                    int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
-                    if (slice_end <= 0) continue;
-                    if (trim) {
-                        queue_barcode_read(&pending_writes, read, 0, slice_end);
-                    } else {
-                        queue_barcode_read(&pending_writes, read, 0, read->len);
-                    }
-                }
-            }
-        }
-    }
-
-    // Dual barcode processing
-    if (barcode_schema == 2) {
-        for (size_t i = 0; i < td->reads->count; i++) {
-            Read *read = &td->reads->items[i];
-            const char *first_read_slice = read->first_slice;
-            const char *last_read_slice = read->last_slice;
-            
-            // fw ------ revcomp(rv)
-            int match_first_fw = levenshtein_distance(first_read_slice, barcode_pos, b->fw, b->fw_length, k); 
-            //printf("DEBUG levenshtein: haystack='%s' (len %zu), needle='%s' (len %zu), k=%zu, result=%d\n", first_read_slice, barcode_pos, b->fw, b->fw_length, k, match_first_fw);
-            if (match_first_fw != -1) {
-                // revcomp(rv)
-                int match_last_fw = levenshtein_distance(last_read_slice, barcode_pos, b->rv_comp, b->rv_length, k);
-                if (match_last_fw != -1) {
-                    b->counter++;
-                    int slice_end = read->len - barcode_pos + match_last_fw - b->rv_length;
-                    if (slice_end <= 0) continue;
-                    if (trim) {
-                        queue_barcode_read(&pending_writes, read, match_first_fw, slice_end);
-                    } else {
-                        queue_barcode_read(&pending_writes, read, 0, read->len);
-                    }
-                }
-            } else {
-                // rv ------ revcomp(fw)
-                int match_first_rv = levenshtein_distance(first_read_slice, barcode_pos, b->rv, b->rv_length, k);
-                if (match_first_rv != -1) {
-                    // revcomp(fw)
-                    int match_last_rv = levenshtein_distance(last_read_slice, barcode_pos, b->fw_comp, b->fw_length, k);
-                    if (match_last_rv != -1) {
-                        b->counter++;
-                        int slice_end = read->len - barcode_pos + match_last_rv - b->fw_length;
-                        if (slice_end <= 0) continue;
-                        if (trim) {
-                            queue_barcode_read(&pending_writes, read, match_first_rv, slice_end);
-                        } else {
-                            queue_barcode_read(&pending_writes, read, 0, read->len);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-cleanup:
-    if (success && !write_pending_reads(td, &pending_writes)) success = false;
-    nob_da_free(pending_writes);
-
-    if (!success) {
-        mark_worker_failed(td);
+    Write_Thread_Data *td = (Write_Thread_Data *)arg;
+    if (!write_pending_reads(td)) {
+        mark_worker_failed(td->error_mutex, td->worker_failed);
     }
     free(td);
+}
+
+static void process_barcode_matches(void *arg)
+{
+    Match_Thread_Data *td = (Match_Thread_Data *)arg;
+    Barcode *barcode = td->barcode;
+
+    if (!(td->barcode_schema == 1 || td->barcode_schema == 2)) {
+        nob_log(NOB_ERROR, "Wrong barcode schema");
+        mark_worker_failed(td->error_mutex, td->worker_failed);
+        free(td);
+        return;
+    }
+
+    for (size_t i = 0; i < td->reads->count; i++) {
+        Read *read = &td->reads->items[i];
+        bool found = false;
+        size_t score = 0;
+        int start = 0;
+        int end = (int)read->len;
+
+        if (td->barcode_schema == 1) {
+            Levenshtein_Match forward_match = {0};
+            Levenshtein_Match reverse_match = {0};
+            bool has_forward = find_best_levenshtein_match(
+                read->first_slice, td->barcode_pos,
+                barcode->fw, barcode->fw_length, td->k, &forward_match);
+            bool has_reverse = false;
+            if (!has_forward || forward_match.distance > 0) {
+                has_reverse = find_best_levenshtein_match(
+                    read->last_slice, td->barcode_pos,
+                    barcode->fw_comp, barcode->fw_length, td->k, &reverse_match);
+            }
+
+            if (has_forward && (!has_reverse || forward_match.distance <= reverse_match.distance)) {
+                found = true;
+                score = forward_match.distance;
+                if (td->trim) start = forward_match.end;
+            } else if (has_reverse) {
+                int slice_end = (int)read->len - (int)td->barcode_pos
+                              + reverse_match.end - (int)barcode->fw_length;
+                if (slice_end > 0) {
+                    found = true;
+                    score = reverse_match.distance;
+                    if (td->trim) end = slice_end;
+                }
+            }
+        } else {
+            Levenshtein_Match left_forward = {0};
+            Levenshtein_Match right_reverse = {0};
+            Levenshtein_Match left_reverse = {0};
+            Levenshtein_Match right_forward = {0};
+
+            bool has_forward_pair = find_best_levenshtein_match(
+                read->first_slice, td->barcode_pos,
+                barcode->fw, barcode->fw_length, td->k, &left_forward);
+            if (has_forward_pair) {
+                has_forward_pair = find_best_levenshtein_match(
+                    read->last_slice, td->barcode_pos,
+                    barcode->rv_comp, barcode->rv_length, td->k, &right_reverse);
+            }
+            size_t forward_score = has_forward_pair
+                ? left_forward.distance + right_reverse.distance : 0;
+
+            bool has_reverse_pair = false;
+            if (!has_forward_pair || forward_score > 0) {
+                has_reverse_pair = find_best_levenshtein_match(
+                    read->first_slice, td->barcode_pos,
+                    barcode->rv, barcode->rv_length, td->k, &left_reverse);
+                if (has_reverse_pair) {
+                    has_reverse_pair = find_best_levenshtein_match(
+                        read->last_slice, td->barcode_pos,
+                        barcode->fw_comp, barcode->fw_length, td->k, &right_forward);
+                }
+            }
+
+            size_t reverse_score = has_reverse_pair
+                ? left_reverse.distance + right_forward.distance : 0;
+
+            if (has_forward_pair && (!has_reverse_pair || forward_score <= reverse_score)) {
+                int slice_end = (int)read->len - (int)td->barcode_pos
+                              + right_reverse.end - (int)barcode->rv_length;
+                if (slice_end > 0) {
+                    found = true;
+                    score = forward_score;
+                    if (td->trim) {
+                        start = left_forward.end;
+                        end = slice_end;
+                    }
+                }
+            } else if (has_reverse_pair) {
+                int slice_end = (int)read->len - (int)td->barcode_pos
+                              + right_forward.end - (int)barcode->fw_length;
+                if (slice_end > 0) {
+                    found = true;
+                    score = reverse_score;
+                    if (td->trim) {
+                        start = left_reverse.end;
+                        end = slice_end;
+                    }
+                }
+            }
+        }
+
+        if (found && start < end) {
+            queue_candidate(td->candidates, i, score, start, end);
+        }
+    }
+
+    free(td);
+}
+
+static bool resolve_candidates(Barcodes *barcodes, Reads *reads,
+                               Candidate_Matches *candidate_sets,
+                               Pending_Writes *writes,
+                               Assignment_Stats *stats)
+{
+    Read_Assignment *assignments = calloc(reads->count, sizeof(*assignments));
+    if (assignments == NULL && reads->count > 0) {
+        nob_log(NOB_ERROR, "Failed to allocate read assignments");
+        return false;
+    }
+
+    for (size_t barcode_index = 0; barcode_index < barcodes->count; barcode_index++) {
+        Candidate_Matches *matches = &candidate_sets[barcode_index];
+        for (size_t i = 0; i < matches->count; i++) {
+            Candidate_Match *candidate = &matches->items[i];
+            Read_Assignment *assignment = &assignments[candidate->read_index];
+
+            if (!assignment->found || candidate->score < assignment->score) {
+                assignment->found = true;
+                assignment->tied = false;
+                assignment->barcode_index = barcode_index;
+                assignment->score = candidate->score;
+                assignment->start = candidate->start;
+                assignment->end = candidate->end;
+            } else if (candidate->score == assignment->score &&
+                       barcode_index != assignment->barcode_index) {
+                assignment->tied = true;
+            }
+        }
+    }
+
+    for (size_t read_index = 0; read_index < reads->count; read_index++) {
+        Read_Assignment *assignment = &assignments[read_index];
+        if (!assignment->found) {
+            stats->unclassified++;
+        } else if (assignment->tied) {
+            stats->ambiguous++;
+        } else {
+            Barcode *barcode = &barcodes->items[assignment->barcode_index];
+            queue_barcode_read(&writes[assignment->barcode_index],
+                               &reads->items[read_index],
+                               assignment->start, assignment->end);
+            barcode->counter++;
+            stats->assigned++;
+        }
+    }
+
+    free(assignments);
+    return true;
 }
 
 static bool dispatch_barcodes(threadpool thpool, Barcodes *barcodes, Reads *reads,
                               size_t barcode_pos, size_t k, bool trim,
                               int barcode_schema, pthread_mutex_t *error_mutex,
-                              bool *worker_failed, Output_Gate *output_gate)
+                              bool *worker_failed, Output_Gate *output_gate,
+                              Assignment_Stats *stats)
 {
+    if (barcodes->count == 0) {
+        stats->unclassified += reads->count;
+        return true;
+    }
+
+    bool success = false;
     bool all_jobs_scheduled = true;
+    Candidate_Matches *candidate_sets = calloc(barcodes->count, sizeof(*candidate_sets));
+    Pending_Writes *writes = calloc(barcodes->count, sizeof(*writes));
+    if (candidate_sets == NULL || writes == NULL) {
+        nob_log(NOB_ERROR, "Failed to allocate batch match data");
+        goto cleanup;
+    }
 
     for (size_t i = 0; i < barcodes->count; i++) {
-        Thread_Data *td = malloc(sizeof(Thread_Data));
+        Match_Thread_Data *td = malloc(sizeof(*td));
         if (td == NULL) {
-            nob_log(NOB_ERROR, "Failed to allocate thread data");
+            nob_log(NOB_ERROR, "Failed to allocate match thread data");
             all_jobs_scheduled = false;
             break;
         }
 
         td->barcode = &barcodes->items[i];
         td->reads = reads;
+        td->candidates = &candidate_sets[i];
         td->barcode_pos = barcode_pos;
         td->k = k;
         td->trim = trim;
         td->barcode_schema = barcode_schema;
         td->error_mutex = error_mutex;
         td->worker_failed = worker_failed;
-        td->output_gate = output_gate;
 
-        if (thpool_add_work(thpool, process_barcode, (void *)td) != 0) {
-            nob_log(NOB_ERROR, "Failed to schedule barcode processing");
+        if (thpool_add_work(thpool, process_barcode_matches, td) != 0) {
+            nob_log(NOB_ERROR, "Failed to schedule barcode matching");
             free(td);
             all_jobs_scheduled = false;
             break;
@@ -324,11 +460,59 @@ static bool dispatch_barcodes(threadpool thpool, Barcodes *barcodes, Reads *read
     }
 
     thpool_wait(thpool);
+    if (!all_jobs_scheduled || has_worker_failed(error_mutex, worker_failed)) {
+        goto cleanup;
+    }
 
-    pthread_mutex_lock(error_mutex);
-    bool failed = *worker_failed;
-    pthread_mutex_unlock(error_mutex);
-    return all_jobs_scheduled && !failed;
+    if (!resolve_candidates(barcodes, reads, candidate_sets, writes, stats)) {
+        goto cleanup;
+    }
+
+    for (size_t i = 0; i < barcodes->count; i++) {
+        if (writes[i].count == 0) continue;
+
+        Write_Thread_Data *td = malloc(sizeof(*td));
+        if (td == NULL) {
+            nob_log(NOB_ERROR, "Failed to allocate write thread data");
+            all_jobs_scheduled = false;
+            break;
+        }
+
+        td->barcode = &barcodes->items[i];
+        td->writes = &writes[i];
+        td->error_mutex = error_mutex;
+        td->worker_failed = worker_failed;
+        td->output_gate = output_gate;
+
+        if (thpool_add_work(thpool, process_pending_writes, td) != 0) {
+            nob_log(NOB_ERROR, "Failed to schedule barcode output");
+            free(td);
+            all_jobs_scheduled = false;
+            break;
+        }
+    }
+
+    thpool_wait(thpool);
+    if (!all_jobs_scheduled || has_worker_failed(error_mutex, worker_failed)) {
+        goto cleanup;
+    }
+
+    success = true;
+
+cleanup:
+    if (candidate_sets != NULL) {
+        for (size_t i = 0; i < barcodes->count; i++) {
+            nob_da_free(candidate_sets[i]);
+        }
+    }
+    if (writes != NULL) {
+        for (size_t i = 0; i < barcodes->count; i++) {
+            nob_da_free(writes[i]);
+        }
+    }
+    free(candidate_sets);
+    free(writes);
+    return success;
 }
 
 int main(int argc, char **argv) {    
@@ -397,6 +581,7 @@ int main(int argc, char **argv) {
     bool worker_failed = false;
     size_t counter = 0;
     size_t reads_shorter_than_p = 0;
+    Assignment_Stats assignment_stats = {0};
     size_t output_handle_count = safe_output_handle_count(*num_threads);
 
     nob_log(NOB_INFO, "Running nanomux");
@@ -496,7 +681,7 @@ int main(int argc, char **argv) {
         // ----------------- TRIGGER THREADS AND PROCESSING ---------------------------
         if (reads.count >= READ_BUFFER) {
             if (!dispatch_barcodes(thpool, &barcodes, &reads, *barcode_pos, *k,
-                                   *trim, barcode_schema, &error_mutex, &worker_failed, &output_gate)) {
+                                   *trim, barcode_schema, &error_mutex, &worker_failed, &output_gate, &assignment_stats)) {
                 goto cleanup;
             }
             
@@ -514,7 +699,7 @@ int main(int argc, char **argv) {
     // PROCESS LEFT OVER READS IN BUFFER
     if (reads.count > 0) {
         if (!dispatch_barcodes(thpool, &barcodes, &reads, *barcode_pos, *k,
-                               *trim, barcode_schema, &error_mutex, &worker_failed, &output_gate)) {
+                               *trim, barcode_schema, &error_mutex, &worker_failed, &output_gate, &assignment_stats)) {
             goto cleanup;
         }
     }
@@ -536,8 +721,14 @@ int main(int argc, char **argv) {
     fprintf(LOG_FILE, "Trim option: %i\n", *trim);
     printf("\nINFO: Processed %zu reads\n", counter);
     printf("INFO: Reads shorter than p: %zu reads\n", reads_shorter_than_p);
+    printf("INFO: Assigned reads: %zu reads\n", assignment_stats.assigned);
+    printf("INFO: Ambiguous reads: %zu reads\n", assignment_stats.ambiguous);
+    printf("INFO: Unclassified reads: %zu reads\n", assignment_stats.unclassified);
     fprintf(LOG_FILE, "Processed %zu reads\n", counter);
     fprintf(LOG_FILE, "Reads shorter than p: %zu reads\n", reads_shorter_than_p);
+    fprintf(LOG_FILE, "Assigned reads: %zu reads\n", assignment_stats.assigned);
+    fprintf(LOG_FILE, "Ambiguous reads: %zu reads\n", assignment_stats.ambiguous);
+    fprintf(LOG_FILE, "Unclassified reads: %zu reads\n", assignment_stats.unclassified);
 
     if (ferror(LOG_FILE)) {
         nob_log(NOB_ERROR, "Failed to write nanomux log: %s", strerror(errno));

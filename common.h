@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 
 
 // ----------------------------------------------------------------------------
@@ -52,6 +53,11 @@ typedef struct {
     size_t capacity;
 } Reads;
 
+typedef struct {
+    int end;
+    size_t distance;
+} Levenshtein_Match;
+
 bool append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end);
 void print_barcode_documentation(void);
 void slice_str(const char * str, char * buffer, size_t start, size_t end);
@@ -63,6 +69,9 @@ int parse_csv_headers(const char *barcode_path);
 void free_barcode(Barcode *bc);
 static inline int min(int a, int b, int c);
 int levenshtein_distance(const char *haystack, size_t haystack_len, const char *needle, size_t needle_len, size_t k);
+bool find_best_levenshtein_match(const char *haystack, size_t haystack_len,
+                                 const char *needle, size_t needle_len, size_t k,
+                                 Levenshtein_Match *match);
 FILE* open_summary_file(const char *out_folder, const char *filename);
 void free_read(Read read);
 char *basename(char const *path);
@@ -212,6 +221,57 @@ int levenshtein_distance(const char *haystack, size_t haystack_len, const char *
     return -1;
 }
 
+bool find_best_levenshtein_match(const char *haystack, size_t haystack_len,
+                                 const char *needle, size_t needle_len, size_t k,
+                                 Levenshtein_Match *match)
+{
+    if (match == NULL || k > needle_len) return false;
+
+    size_t previous_storage[haystack_len + 1];
+    size_t current_storage[haystack_len + 1];
+    size_t *previous = previous_storage;
+    size_t *current = current_storage;
+
+    for (size_t j = 0; j <= haystack_len; j++) {
+        previous[j] = 0;
+    }
+
+    for (size_t i = 1; i <= needle_len; i++) {
+        current[0] = i;
+        for (size_t j = 1; j <= haystack_len; j++) {
+            if (needle[i - 1] == haystack[j - 1]) {
+                current[j] = previous[j - 1];
+            } else {
+                current[j] = 1 + min(previous[j], current[j - 1],
+                                     previous[j - 1]);
+            }
+        }
+
+        size_t *swap = previous;
+        previous = current;
+        current = swap;
+    }
+
+    bool found = false;
+    size_t best_distance = k + 1;
+    int best_end = -1;
+    for (size_t j = needle_len; j <= haystack_len; j++) {
+        size_t distance = previous[j];
+        if (distance <= k && distance < best_distance) {
+            found = true;
+            best_distance = distance;
+            best_end = (int)j;
+            if (best_distance == 0) break;
+        }
+    }
+
+    if (!found) return false;
+
+    match->end = best_end;
+    match->distance = best_distance;
+    return true;
+}
+
 static inline int min(int a, int b, int c) 
 {
     int min = a;
@@ -302,6 +362,19 @@ void free_read(Read read)
     free((void *)read.last_slice);
 }
 
+static bool gzwrite_all(gzFile gzfp, const char *data, size_t length)
+{
+    while (length > 0) {
+        unsigned chunk = length > (size_t)INT_MAX ? (unsigned)INT_MAX : (unsigned)length;
+        int written = gzwrite(gzfp, data, chunk);
+        if (written <= 0) return false;
+
+        data += written;
+        length -= (size_t)written;
+    }
+    return true;
+}
+
 bool append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end) 
 {
     int length = read->len;  
@@ -312,20 +385,20 @@ bool append_read_to_gzip_fastq(gzFile gzfp, Read *read, int start, int end)
         return false;
     }
     
-    size_t trimmed_length = end - start;
-    int ret = gzprintf(
-        gzfp, 
-        "@%s\n"
-        "%.*s\n"
-        "+\n"
-        "%.*s\n", 
-        read->name, 
-        (int)trimmed_length, read->seq + start,
-        (int)trimmed_length, read->qual + start
-    );
-    
-    if (ret < 0) {
-        printf("ERROR: Failed to write FASTQ record\n");
+    size_t trimmed_length = (size_t)(end - start);
+    bool written =
+        gzwrite_all(gzfp, "@", 1) &&
+        gzwrite_all(gzfp, read->name, strlen(read->name)) &&
+        gzwrite_all(gzfp, "\n", 1) &&
+        gzwrite_all(gzfp, read->seq + start, trimmed_length) &&
+        gzwrite_all(gzfp, "\n+\n", 3) &&
+        gzwrite_all(gzfp, read->qual + start, trimmed_length) &&
+        gzwrite_all(gzfp, "\n", 1);
+
+    if (!written) {
+        int error_number = Z_OK;
+        const char *error_message = gzerror(gzfp, &error_number);
+        nob_log(NOB_ERROR, "Failed to write FASTQ record: %s", error_message);
         return false;
     }
     return true;
