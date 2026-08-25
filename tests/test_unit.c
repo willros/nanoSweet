@@ -94,6 +94,31 @@ void test_levenshtein_distance(void) {
     ASSERT(result == -1, "k > needle_len returns -1");
 }
 
+// ---- find_best_levenshtein_match ----
+void test_find_best_levenshtein_match(void) {
+    TEST("find_best_levenshtein_match");
+
+    Levenshtein_Match match = {0};
+    bool found = find_best_levenshtein_match(
+        "AAATNAAAA", 9, "AAAA", 4, 1, &match);
+    ASSERT(found, "finds a match within k");
+    ASSERT(match.distance == 0, "later exact match beats earlier approximate match");
+    ASSERT(match.end == 9, "returns the end position of the best match");
+
+    found = find_best_levenshtein_match(
+        "AAATNNNNN", 9, "AAAA", 4, 1, &match);
+    ASSERT(found && match.distance == 1 && match.end == 4,
+           "returns an approximate match when it is the best available");
+
+    found = find_best_levenshtein_match(
+        "NNNNNNNNN", 9, "AAAA", 4, 1, &match);
+    ASSERT(!found, "rejects matches beyond k");
+
+    found = find_best_levenshtein_match(
+        "AAAA", 4, "AAAA", 4, 0, NULL);
+    ASSERT(!found, "rejects a null result pointer");
+}
+
 // ---- parse_csv_headers ----
 void test_parse_csv_headers(void) {
     TEST("parse_csv_headers");
@@ -176,6 +201,7 @@ int main(void) {
     test_complement();
     test_complement_sequence();
     test_levenshtein_distance();
+    test_find_best_levenshtein_match();
     test_parse_csv_headers();
     test_is_fastq();
     test_average_qual();

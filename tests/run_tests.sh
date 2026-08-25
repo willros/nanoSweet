@@ -186,15 +186,28 @@ fi
 # ---------- Test 11: Many matching barcodes under a low descriptor limit ----------
 echo "TEST 11: Low descriptor limit with many barcodes"
 MANY_BARCODES="$TEST_TMP_DIR/many_barcodes.csv"
-ONE_READ="$TEST_TMP_DIR/one_read.fastq"
+MANY_READS="$TEST_TMP_DIR/many_reads.fastq"
 printf 'name,forward\n' > "$MANY_BARCODES"
+: > "$MANY_READS"
 for i in $(seq 1 300); do
-    printf 'BC_%03d,ACGT\n' "$i" >> "$MANY_BARCODES"
+    value=$((i - 1))
+    barcode=""
+    for ((position = 0; position < 8; position++)); do
+        case $((value % 4)) in
+            0) base=A ;;
+            1) base=C ;;
+            2) base=G ;;
+            3) base=T ;;
+        esac
+        barcode="${base}${barcode}"
+        value=$((value / 4))
+    done
+    printf 'BC_%03d,%s\n' "$i" "$barcode" >> "$MANY_BARCODES"
+    printf '@fd_%03d\n%sAAAAAAAAAAAA\n+\nIIIIIIIIIIIIIIIIIIII\n' "$i" "$barcode" >> "$MANY_READS"
 done
-printf '@fd_read\nACGTAAAAAAAAAAAAAAAA\n+\nIIIIIIIIIIIIIIIIIIII\n' > "$ONE_READ"
 
 OUT="$TEST_TMP_DIR/test11"
-if (ulimit -n 32; "$NANOMUX" -b "$MANY_BARCODES" -f "$ONE_READ" -o "$OUT" -p 12 -k 0 -j 64) >"$TEST_TMP_DIR/test11.stdout" 2>"$TEST_TMP_DIR/test11.stderr"; then
+if (ulimit -n 32; "$NANOMUX" -b "$MANY_BARCODES" -f "$MANY_READS" -o "$OUT" -p 8 -k 0 -j 64) >"$TEST_TMP_DIR/test11.stdout" 2>"$TEST_TMP_DIR/test11.stderr"; then
     PASS=$((PASS + 1))
 else
     FAIL=$((FAIL + 1))
@@ -241,6 +254,87 @@ if grep -q 'Segmentation fault' "$TEST_TMP_DIR/test12.stderr"; then
     echo "  FAIL: summary open failure caused a segmentation fault"
 else
     PASS=$((PASS + 1))
+fi
+
+# ---------- Test 13: Single-barcode ambiguous reads ----------
+echo "TEST 13: Single-barcode ambiguity resolution"
+AMBIG_SINGLE_BARCODES="$TEST_TMP_DIR/ambiguous_single.csv"
+AMBIG_SINGLE_FASTQ="$TEST_TMP_DIR/ambiguous_single.fastq"
+printf 'name,forward\nBC_A,AACCGGTTAACC\nBC_B,AACCGGTTAACG\n' > "$AMBIG_SINGLE_BARCODES"
+: > "$AMBIG_SINGLE_FASTQ"
+
+write_fastq_read() {
+    local name="$1"
+    local sequence="$2"
+    local quality
+    printf -v quality '%*s' "${#sequence}" ''
+    quality=${quality// /I}
+    printf '@%s\n%s\n+\n%s\n' "$name" "$sequence" "$quality"
+}
+
+write_fastq_read clear_best 'AACCGGTTAACCNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN' >> "$AMBIG_SINGLE_FASTQ"
+write_fastq_read tied_best 'AACCGGTTAACCNNNAACCGGTTAACGNNNNNNNNNNNNNNNN' >> "$AMBIG_SINGLE_FASTQ"
+write_fastq_read no_match 'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN' >> "$AMBIG_SINGLE_FASTQ"
+
+for threads in 1 64; do
+    OUT="$TEST_TMP_DIR/test13_j${threads}"
+    "$NANOMUX" -b "$AMBIG_SINGLE_BARCODES" -f "$AMBIG_SINGLE_FASTQ" -o "$OUT" -p 30 -k 1 -j "$threads" >/dev/null 2>&1
+    assert_eq "single ambiguity BC_A count (j=$threads)" "1" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
+    assert_eq "single ambiguity BC_B count (j=$threads)" "0" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_B")"
+    assert_read_in_output "lower-distance read assigned to BC_A (j=$threads)" "clear_best" "$OUT/BC_A.fq.gz"
+    assert_read_not_in_output "tied read excluded (j=$threads)" "tied_best" "$OUT/BC_A.fq.gz"
+    assert_file_not_exists "empty BC_B output removed (j=$threads)" "$OUT/BC_B.fq.gz"
+    assert_eq "single assigned count (j=$threads)" "1" "$(grep '^Assigned reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+    assert_eq "single ambiguous count (j=$threads)" "1" "$(grep '^Ambiguous reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+    assert_eq "single unclassified count (j=$threads)" "1" "$(grep '^Unclassified reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+done
+assert_eq "single ambiguity deterministic across thread counts" \
+    "$(cat "$TEST_TMP_DIR/test13_j1/nanomux_matches.csv")" \
+    "$(cat "$TEST_TMP_DIR/test13_j64/nanomux_matches.csv")"
+
+# ---------- Test 14: Dual-barcode ambiguous reads ----------
+echo "TEST 14: Dual-barcode ambiguity resolution"
+AMBIG_DUAL_BARCODES="$TEST_TMP_DIR/ambiguous_dual.csv"
+AMBIG_DUAL_FASTQ="$TEST_TMP_DIR/ambiguous_dual.fastq"
+printf 'name,forward,reverse\nBC_A,AAAACCCC,CCCCAAAA\nBC_B,GGGGTTTT,TTTTGGGG\n' > "$AMBIG_DUAL_BARCODES"
+: > "$AMBIG_DUAL_FASTQ"
+write_fastq_read dual_clear 'AAAACCCCNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNTTTTGGGG' >> "$AMBIG_DUAL_FASTQ"
+write_fastq_read dual_tied 'AAAACCCCNNGGGGTTTTNNNNNNNNNNNNNNNNNNNNNNNNNNNNTTTTGGGGNNCCCCAAAA' >> "$AMBIG_DUAL_FASTQ"
+
+OUT="$TEST_TMP_DIR/test14"
+"$NANOMUX" -b "$AMBIG_DUAL_BARCODES" -f "$AMBIG_DUAL_FASTQ" -o "$OUT" -p 20 -k 0 -j 8 >/dev/null 2>&1
+assert_eq "dual ambiguity BC_A count" "1" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_A")"
+assert_eq "dual ambiguity BC_B count" "0" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_B")"
+assert_read_in_output "unique dual read assigned to BC_A" "dual_clear" "$OUT/BC_A.fq.gz"
+assert_read_not_in_output "tied dual read excluded" "dual_tied" "$OUT/BC_A.fq.gz"
+assert_file_not_exists "empty dual BC_B output removed" "$OUT/BC_B.fq.gz"
+assert_eq "dual assigned count" "1" "$(grep '^Assigned reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+assert_eq "dual ambiguous count" "1" "$(grep '^Ambiguous reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+assert_eq "dual unclassified count" "0" "$(grep '^Unclassified reads:' "$OUT/nanomux.log" | cut -d' ' -f3)"
+
+# ---------- Test 15: Long FASTQ records exceed gzprintf's internal buffer ----------
+echo "TEST 15: Long FASTQ record output"
+LONG_BARCODES="$TEST_TMP_DIR/long_record_barcodes.csv"
+LONG_FASTQ="$TEST_TMP_DIR/long_record.fastq"
+printf 'name,forward\nBC_LONG,ACGT\n' > "$LONG_BARCODES"
+printf -v long_tail '%*s' 5000 ''
+long_tail=${long_tail// /A}
+long_sequence="ACGT${long_tail}"
+printf -v long_quality '%*s' "${#long_sequence}" ''
+long_quality=${long_quality// /I}
+printf '@long_read\n%s\n+\n%s\n' "$long_sequence" "$long_quality" > "$LONG_FASTQ"
+
+OUT="$TEST_TMP_DIR/test15"
+"$NANOMUX" -b "$LONG_BARCODES" -f "$LONG_FASTQ" -o "$OUT" -p 12 -k 0 -j 4 >/dev/null 2>&1
+assert_eq "long-record summary count" "1" "$(get_match_count "$OUT/nanomux_matches.csv" "BC_LONG")"
+assert_eq "long record written" "1" "$(count_reads "$OUT/BC_LONG.fq.gz")"
+assert_eq "long sequence preserved" "${#long_sequence}" "$(gzip -cd "$OUT/BC_LONG.fq.gz" | awk 'NR == 2 {print length($0)}')"
+assert_eq "long quality preserved" "${#long_quality}" "$(gzip -cd "$OUT/BC_LONG.fq.gz" | awk 'NR == 4 {print length($0)}')"
+if gzip -t "$OUT/BC_LONG.fq.gz"; then
+    PASS=$((PASS + 1))
+else
+    FAIL=$((FAIL + 1))
+    echo "  FAIL: long-record output is not a valid gzip stream"
 fi
 
 # ---------- Summary ----------
